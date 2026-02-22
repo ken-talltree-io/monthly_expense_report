@@ -155,6 +155,25 @@ MERCHANT_ALIASES = {
     "DECATHLON": "Decathlon",
     "CAPRI VALLEY": "Capri Valley Lanes",
     "OTTER CO-OP": "Otter Co-op",
+    # Debit card merchants
+    "STRATFORD HALL": "Stratford Hall (Tuition)",
+    "HYUNDAI PMNT": "Hyundai Car Payment",
+    "FORTISBC": "FortisBC",
+    "B.C. HYDRO": "BC Hydro",
+    "DR. LIAT TZUR": "Dr. Liat Tzur (Orthodontics)",
+    "ZENSURANCE": "Zensurance",
+    "FRESHBOOKS": "FreshBooks",
+    "FN": "Mortgage (First National)",
+}
+
+# Business expenses — excluded from personal spending totals
+BUSINESS_MERCHANTS = {"Zensurance", "FreshBooks"}
+
+# Debt payoff thresholds — AFT_OUT amounts above these are one-time payoffs,
+# not regular spending. Regular payments (below threshold) remain as fixed costs.
+DEBT_PAYOFF_THRESHOLDS = {
+    "Mortgage (First National)": 5000,
+    "Hyundai Car Payment": 5000,
 }
 
 
@@ -255,6 +274,7 @@ CATEGORY_RULES = [
     ]),
     ("Dental", [
         "Yaletown Dentistry", "Cambie Broadway Dental", "Tot 2 Teen Dental",
+        "Dr. Liat Tzur", "Sunrise Orthodontics",
     ]),
     ("Insurance", [
         "ICBC", "BCAA Insurance", "Wawanesa",
@@ -274,6 +294,7 @@ CATEGORY_RULES = [
     ]),
     ("Auto", [
         "KAL Tire", "Shine Auto Wash", "Air-Serv", "Tesla", "Sony Wash",
+        "Hyundai Car Payment",
     ]),
     ("Travel & Hotels", [
         "Best Western", "Nomade Cabo", "Merpago", "Clip Mx",
@@ -281,6 +302,17 @@ CATEGORY_RULES = [
     ]),
     ("Donations", [
         "Make-A-Wish",
+    ]),
+    ("Education", [
+        "Stratford Hall",
+    ]),
+    ("Utilities", [
+        "FortisBC", "BC Hydro",
+    ]),
+    ("Medical", [
+    ]),
+    ("Housing", [
+        "Mortgage",
     ]),
 ]
 
@@ -302,6 +334,43 @@ def load_user_categories(folder: str) -> dict:
     return overrides
 
 
+def load_notes(folder: str) -> dict:
+    """Load merchant → note from notes.csv if it exists."""
+    notes = {}
+    path = os.path.join(folder, "notes.csv")
+    if not os.path.exists(path):
+        return notes
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            merchant = (row.get("merchant") or "").strip()
+            note = (row.get("note") or "").strip()
+            if merchant and note and not merchant.startswith("# "):
+                notes[merchant.lower()] = note
+    if notes:
+        print(f"Loaded {len(notes)} notes from notes.csv")
+    return notes
+
+
+def load_budgets(folder: str) -> dict:
+    """Load category → monthly budget target from budgets.csv if it exists."""
+    budgets = {}
+    path = os.path.join(folder, "budgets.csv")
+    if not os.path.exists(path):
+        return budgets
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            category = (row.get("category") or "").strip()
+            target = (row.get("monthly_target") or "").strip().replace("$", "").replace(",", "")
+            if category and target and not category.startswith("# "):
+                try:
+                    budgets[category] = float(target)
+                except ValueError:
+                    pass
+    if budgets:
+        print(f"Loaded {len(budgets)} budget targets from budgets.csv")
+    return budgets
+
+
 # Global user overrides — populated in main() before categorization
 _user_categories: dict = {}
 
@@ -321,47 +390,197 @@ def categorize(merchant: str) -> str:
 # ── CSV Parsing ──────────────────────────────────────────────────────────────
 
 def parse_csvs(folder: str) -> list[dict]:
-    """Read all CSV files and return a list of transaction dicts."""
+    """Read credit card and debit card CSVs, return unified transaction list."""
     transactions = []
-    files = sorted(glob.glob(os.path.join(folder, "credit-card-*.csv")))
-    if not files:
-        # Fall back to all CSVs except categories.csv
-        files = sorted(f for f in glob.glob(os.path.join(folder, "*.csv"))
-                       if not os.path.basename(f).startswith("categories"))
-    if not files:
+
+    # Collect CSV files from subdirectories
+    all_files = []
+    for subdir in ["credit card", "debit card"]:
+        subpath = os.path.join(folder, subdir)
+        if os.path.isdir(subpath):
+            all_files.extend(sorted(glob.glob(os.path.join(subpath, "*.csv"))))
+    # Backward compat: check root folder for credit-card-*.csv
+    root_csvs = sorted(glob.glob(os.path.join(folder, "credit-card-*.csv")))
+    if root_csvs:
+        all_files.extend(root_csvs)
+    if not all_files:
+        skip = {"categories", "notes", "budgets"}
+        all_files = sorted(f for f in glob.glob(os.path.join(folder, "*.csv"))
+                           if not any(os.path.basename(f).startswith(s) for s in skip))
+    if not all_files:
         print(f"Error: No CSV files found in {folder}")
         sys.exit(1)
 
-    for fpath in files:
+    credit_count = debit_count = 0
+    business_total = 0.0
+    debt_payoffs = []  # track individual debt payoff events
+    for fpath in all_files:
         with open(fpath, newline="", encoding="utf-8-sig") as f:
             reader = csv.DictReader(f)
-            for row in reader:
+            headers = reader.fieldnames or []
+
+            if "transaction_date" in headers:
+                # ── Credit card format ──
+                credit_count += 1
+                for row in reader:
+                    amount = float(row["amount"])
+                    txn_type = row.get("type", "Purchase")
+                    if amount < 0 or txn_type.strip().lower() == "payment":
+                        continue
+                    date = datetime.strptime(row["transaction_date"], "%Y-%m-%d")
+                    raw_merchant = row["details"]
+                    merchant = normalize_merchant(raw_merchant)
+                    if merchant in BUSINESS_MERCHANTS:
+                        business_total += amount
+                        continue
+                    transactions.append({
+                        "date": date,
+                        "month": date.strftime("%Y-%m"),
+                        "raw_merchant": raw_merchant,
+                        "merchant": merchant,
+                        "category": categorize(merchant),
+                        "amount": amount,
+                        "source": "credit",
+                    })
+
+            elif "transaction" in headers:
+                # ── Debit card format ──
+                debit_count += 1
+                for row in reader:
+                    txn_type = row["transaction"]
+                    amount = float(row["amount"])
+                    description = row["description"]
+
+                    if txn_type == "SPEND":
+                        date = datetime.strptime(row["date"], "%Y-%m-%d")
+                        merchant = normalize_merchant(description)
+                        if merchant in BUSINESS_MERCHANTS:
+                            business_total += abs(amount)
+                            continue
+                        transactions.append({
+                            "date": date,
+                            "month": date.strftime("%Y-%m"),
+                            "raw_merchant": description,
+                            "merchant": merchant,
+                            "category": categorize(merchant),
+                            "amount": abs(amount),
+                            "source": "debit",
+                        })
+                    elif txn_type == "AFT_OUT":
+                        # Extract merchant from "Pre-authorized Debit to MERCHANT"
+                        merchant_raw = description
+                        if "Pre-authorized Debit to " in description:
+                            merchant_raw = description.split("Pre-authorized Debit to ", 1)[1]
+                        date = datetime.strptime(row["date"], "%Y-%m-%d")
+                        merchant = normalize_merchant(merchant_raw)
+                        amt = abs(amount)
+                        # Exclude large one-time debt payoffs
+                        threshold = DEBT_PAYOFF_THRESHOLDS.get(merchant)
+                        if threshold and amt > threshold:
+                            debt_payoffs.append({
+                                "merchant": merchant,
+                                "amount": amt,
+                                "date": date,
+                            })
+                            continue
+                        transactions.append({
+                            "date": date,
+                            "month": date.strftime("%Y-%m"),
+                            "raw_merchant": description,
+                            "merchant": merchant,
+                            "category": categorize(merchant),
+                            "amount": amt,
+                            "source": "debit",
+                            "fixed_cost": True,
+                        })
+
+    print(f"Found {credit_count} credit card and {debit_count} debit card CSV files")
+    if business_total > 0:
+        print(f"Excluded ${business_total:,.2f} in business expenses (Zensurance, FreshBooks)")
+    if debt_payoffs:
+        total_payoffs = sum(d["amount"] for d in debt_payoffs)
+        print(f"Excluded ${total_payoffs:,.2f} in debt payoffs (mortgage/auto — paid off)")
+    return sorted(transactions, key=lambda t: t["date"]), debt_payoffs
+
+
+# ── Income & Transfer Extraction ─────────────────────────────────────────────
+
+def extract_income(folder: str) -> dict:
+    """Extract monthly income totals from debit card CSVs.
+
+    Includes: EFT deposits matching $25K pattern, AFT_IN from Brock Health.
+    Excludes: Steadyhand redemptions, large one-time transfers, inheritance.
+    """
+    income = defaultdict(float)
+    debit_dir = os.path.join(folder, "debit card")
+    if not os.path.isdir(debit_dir):
+        return {}
+
+    for fpath in sorted(glob.glob(os.path.join(debit_dir, "*.csv"))):
+        with open(fpath, newline="", encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                txn_type = row["transaction"]
                 amount = float(row["amount"])
-                txn_type = row.get("type", "Purchase")
-                if amount < 0 or txn_type.strip().lower() == "payment":
-                    continue  # skip payments/credits
-                date = datetime.strptime(row["transaction_date"], "%Y-%m-%d")
-                raw_merchant = row["details"]
-                merchant = normalize_merchant(raw_merchant)
-                transactions.append({
-                    "date": date,
-                    "month": date.strftime("%Y-%m"),
-                    "raw_merchant": raw_merchant,
-                    "merchant": merchant,
-                    "category": categorize(merchant),
-                    "amount": amount,
-                })
-    return sorted(transactions, key=lambda t: t["date"])
+                description = row.get("description", "")
+                date = datetime.strptime(row["date"], "%Y-%m-%d")
+                month = date.strftime("%Y-%m")
+
+                # Regular $25K EFT deposits (salary/income pattern)
+                if txn_type == "EFT" and amount == 25000.0:
+                    income[month] += amount
+
+                # Brock Health direct deposits (employment income)
+                if txn_type == "AFT_IN" and "BROCK HEALTH" in description.upper():
+                    income[month] += amount
+
+    return dict(income)
+
+
+def extract_transfers(folder: str) -> dict:
+    """Extract monthly transfer summary from debit card CSVs.
+
+    Returns dict of month -> {"in": float, "out": float}.
+    Covers TRFOUT, TRFIN, TRFINTF, E_TRFOUT, E_TRFIN, EFTOUT.
+    """
+    TRANSFER_TYPES = {"TRFOUT", "TRFIN", "TRFINTF", "E_TRFOUT", "E_TRFIN", "EFTOUT"}
+    transfers = defaultdict(lambda: {"in": 0.0, "out": 0.0})
+    debit_dir = os.path.join(folder, "debit card")
+    if not os.path.isdir(debit_dir):
+        return {}
+
+    for fpath in sorted(glob.glob(os.path.join(debit_dir, "*.csv"))):
+        with open(fpath, newline="", encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                txn_type = row["transaction"]
+                if txn_type not in TRANSFER_TYPES:
+                    continue
+                amount = float(row["amount"])
+                date = datetime.strptime(row["date"], "%Y-%m-%d")
+                month = date.strftime("%Y-%m")
+
+                if amount > 0:
+                    transfers[month]["in"] += amount
+                else:
+                    transfers[month]["out"] += abs(amount)
+
+    return {m: {"in": round(v["in"], 2), "out": round(v["out"], 2)}
+            for m, v in transfers.items()}
 
 
 # ── Analysis ─────────────────────────────────────────────────────────────────
 
-def analyze(transactions: list[dict]) -> dict:
+def analyze(transactions: list[dict], income: dict | None = None,
+            transfers: dict | None = None,
+            debt_payoffs: list | None = None) -> dict:
+    income = income or {}
+    transfers = transfers or {}
+    debt_payoffs = debt_payoffs or []
     months_set = sorted({t["month"] for t in transactions})
     total = sum(t["amount"] for t in transactions)
     monthly_totals = defaultdict(float)
     category_totals = defaultdict(float)
     category_counts = defaultdict(int)
+    category_monthly = defaultdict(lambda: defaultdict(float))
     merchant_totals = defaultdict(float)
     merchant_counts = defaultdict(int)
     merchant_monthly = defaultdict(lambda: defaultdict(float))
@@ -371,6 +590,7 @@ def analyze(transactions: list[dict]) -> dict:
         monthly_totals[t["month"]] += t["amount"]
         category_totals[t["category"]] += t["amount"]
         category_counts[t["category"]] += 1
+        category_monthly[t["category"]][t["month"]] += t["amount"]
         merchant_totals[t["merchant"]] += t["amount"]
         merchant_counts[t["merchant"]] += 1
         merchant_monthly[t["merchant"]][t["month"]] += t["amount"]
@@ -398,6 +618,7 @@ def analyze(transactions: list[dict]) -> dict:
         "Groceries", "Liquor & Alcohol", "Clothing", "Sports & Outdoor",
         "Entertainment", "Amazon", "Home Improvement", "Parking & Gas",
         "Kids", "Travel & Hotels", "Donations", "Ski Resorts",
+        "Education", "Utilities", "Medical", "Housing",
     }
 
     # Known service/subscription merchant keywords (always consider these)
@@ -508,6 +729,33 @@ def analyze(transactions: list[dict]) -> dict:
     num_months = len(months_set)
     categories = [(c, round(t, 2), round(t / num_months, 2), category_counts[c]) for c, t in categories]
 
+    # Source breakdown (credit vs debit spending by month)
+    source_monthly = defaultdict(lambda: defaultdict(float))
+    for t in transactions:
+        source_monthly[t.get("source", "credit")][t["month"]] += t["amount"]
+
+    # Fixed costs (AFT_OUT transactions)
+    fixed_merchants = defaultdict(lambda: defaultdict(float))
+    for t in transactions:
+        if t.get("fixed_cost"):
+            fixed_merchants[t["merchant"]][t["month"]] += t["amount"]
+    fixed_total = sum(t["amount"] for t in transactions if t.get("fixed_cost"))
+
+    fixed_cost_detail = sorted(
+        [(m, round(sum(amounts.values()), 2),
+          {mo: round(amounts.get(mo, 0), 2) for mo in months_set})
+         for m, amounts in fixed_merchants.items()],
+        key=lambda x: x[1], reverse=True
+    )
+
+    # Savings rate per month
+    savings_rate = {}
+    for m in months_set:
+        inc = income.get(m, 0)
+        spend = monthly_totals.get(m, 0)
+        if inc > 0:
+            savings_rate[m] = round(((inc - spend) / inc) * 100, 1)
+
     return {
         "months": months_set,
         "total": round(total, 2),
@@ -515,9 +763,19 @@ def analyze(transactions: list[dict]) -> dict:
         "mom_change": round(mom_change, 1),
         "monthly_totals": {m: round(monthly_totals[m], 2) for m in months_set},
         "categories": categories,
+        "category_monthly": {c: {m: round(category_monthly[c].get(m, 0), 2) for m in months_set} for c in category_totals},
         "subscriptions": subscriptions,
         "top_merchants": top_merchants,
         "monthly_txns": {m: sorted(monthly_txns[m], key=lambda t: t["date"]) for m in months_set},
+        "income": income,
+        "transfers": transfers,
+        "savings_rate": savings_rate,
+        "fixed_costs": {m: round(sum(v.get(m, 0) for v in fixed_merchants.values()), 2) for m in months_set},
+        "fixed_cost_detail": fixed_cost_detail,
+        "fixed_total": round(fixed_total, 2),
+        "discretionary_total": round(total - fixed_total, 2),
+        "source_breakdown": {s: {m: round(source_monthly[s].get(m, 0), 2) for m in months_set} for s in source_monthly},
+        "debt_payoffs": debt_payoffs,
     }
 
 
@@ -551,16 +809,27 @@ def get_ai_recommendations(data: dict) -> str | None:
             {"name": m, "total": t, "txn_count": c}
             for m, t, c in data["top_merchants"]
         ],
+        "income": data.get("income", {}),
+        "savings_rate": data.get("savings_rate", {}),
+        "fixed_costs": [
+            {"merchant": m, "total": t} for m, t, _ in data.get("fixed_cost_detail", [])
+        ],
+        "fixed_total": data.get("fixed_total", 0),
+        "discretionary_total": data.get("discretionary_total", 0),
     }
 
-    prompt = f"""Analyze this household credit card spending data and provide actionable recommendations.
+    prompt = f"""Analyze this household spending data (credit card + debit card combined) and provide actionable recommendations.
+
+The data includes income, fixed costs (tuition, car payment, utilities), and discretionary spending. Savings rate is calculated where income data is available.
 
 DATA:
 {json.dumps(summary, indent=2)}
 
 Please provide exactly 10 numbered recommendations — no more, no less. Each should be specific, actionable, and reference actual merchant names and dollar amounts from the data. Cover a mix of:
+- Fixed cost optimization (insurance, utilities, recurring debits)
 - Subscription cost-saving actions (price increases to negotiate, services to cancel/downgrade)
 - Spending pattern optimizations (consolidation, alternatives)
+- Income and savings rate observations
 - Notable month-over-month changes worth investigating
 
 Format your response in clean HTML as a single <ol> list with 10 <li> items. Use <strong> for emphasis on merchant names and dollar amounts. Be concise — one short paragraph per recommendation."""
@@ -599,7 +868,10 @@ Format your response in clean HTML as a single <ol> list with 10 <li> items. Use
 
 # ── HTML Generation ──────────────────────────────────────────────────────────
 
-def generate_html(data: dict, ai_html: str | None = None) -> str:
+def generate_html(data: dict, ai_html: str | None = None,
+                   notes: dict | None = None, budgets: dict | None = None) -> str:
+    notes = notes or {}
+    budgets = budgets or {}
     months = data["months"]
     month_labels = [datetime.strptime(m, "%Y-%m").strftime("%b %Y") for m in months]
 
@@ -622,12 +894,87 @@ def generate_html(data: dict, ai_html: str | None = None) -> str:
     def money(val):
         return f"${val:,.2f}"
 
-    # Category data for charts
+    def sparkline(values: list[float], width: int = 80, height: int = 24) -> str:
+        """Generate an inline SVG sparkline from a list of values."""
+        if not values or max(values) == 0:
+            return ""
+        max_v = max(values)
+        min_v = min(values)
+        rng = max_v - min_v if max_v != min_v else 1
+        n = len(values)
+        points = []
+        for i, v in enumerate(values):
+            x = round(i / max(n - 1, 1) * (width - 4) + 2, 1)
+            y = round(height - 2 - ((v - min_v) / rng) * (height - 4), 1)
+            points.append(f"{x},{y}")
+        if n >= 2:
+            trend = values[-1] - values[0]
+            color = "#e15759" if trend > rng * 0.1 else "#27ae60" if trend < -rng * 0.1 else "#7f8c8d"
+        else:
+            color = "#7f8c8d"
+        return (f'<svg width="{width}" height="{height}" style="vertical-align:middle">'
+                f'<polyline points="{" ".join(points)}" fill="none" stroke="{color}" '
+                f'stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>'
+                f'<circle cx="{points[-1].split(",")[0]}" cy="{points[-1].split(",")[1]}" '
+                f'r="2.5" fill="{color}"/></svg>')
+
+    def budget_bar(actual: float, target: float) -> str:
+        """Generate an inline budget progress bar."""
+        pct = min(actual / target * 100, 150) if target > 0 else 0
+        color = "#27ae60" if pct <= 90 else "#f39c12" if pct <= 105 else "#e15759"
+        bar_width = min(pct / 150 * 100, 100)
+        over = f" ({actual/target*100:.0f}%)" if pct > 0 else ""
+        return (f'<div style="display:flex;align-items:center;gap:6px">'
+                f'<div style="flex:1;background:#eee;border-radius:4px;height:8px;min-width:60px">'
+                f'<div style="width:{bar_width:.0f}%;background:{color};border-radius:4px;height:100%"></div>'
+                f'</div>'
+                f'<span style="font-size:0.78em;color:{color};white-space:nowrap">{money(target)}{over}</span>'
+                f'</div>')
+
+    # ── Data preparation ──
     cat_labels = json.dumps([c[0] for c in data["categories"]])
     cat_values = json.dumps([c[1] for c in data["categories"]])
     cat_colors = json.dumps(COLORS[:len(data["categories"])])
     monthly_values = json.dumps([data["monthly_totals"][m] for m in months])
     month_labels_json = json.dumps(month_labels)
+
+    # Source breakdown for stacked bar chart
+    source_breakdown = data.get("source_breakdown", {})
+    credit_monthly = json.dumps([source_breakdown.get("credit", {}).get(m, 0) for m in months])
+    debit_monthly = json.dumps([source_breakdown.get("debit", {}).get(m, 0) for m in months])
+    has_debit = "debit" in source_breakdown
+
+    # Income & savings data
+    income_data = data.get("income", {})
+    savings_rate = data.get("savings_rate", {})
+    has_income = bool(income_data)
+    total_income = sum(income_data.values())
+    num_income_months = sum(1 for m in months if income_data.get(m, 0) > 0)
+    avg_income = total_income / num_income_months if num_income_months else 0
+    rates_with_income = [savings_rate[m] for m in months if m in savings_rate]
+    avg_savings_rate = round(sum(rates_with_income) / len(rates_with_income), 1) if rates_with_income else 0
+
+    # Fixed costs data
+    fixed_detail = data.get("fixed_cost_detail", [])
+    fixed_total = data.get("fixed_total", 0)
+    discretionary_total = data.get("discretionary_total", 0)
+    fixed_pct = round(fixed_total / data["total"] * 100, 1) if data["total"] > 0 else 0
+
+    # Transfers data
+    transfers = data.get("transfers", {})
+
+    # Debt payoff data
+    debt_payoffs = data.get("debt_payoffs", [])
+    INTEREST_RATES = {
+        "Mortgage (First National)": 0.0325,
+        "Hyundai Car Payment": 0.0399,
+    }
+    debt_payoff_total = sum(d["amount"] for d in debt_payoffs)
+    annual_interest_saved = sum(
+        d["amount"] * INTEREST_RATES.get(d["merchant"], 0) for d in debt_payoffs
+    )
+
+    # ── Build table rows ──
 
     # Subscription table rows
     sub_rows = ""
@@ -640,8 +987,10 @@ def generate_html(data: dict, ai_html: str | None = None) -> str:
             else:
                 month_cells += "<td style='text-align:center;color:#ccc'>—</td>"
         alert_html = "<br>".join(f"<small style='color:#e74c3c'>{a}</small>" for a in s["alerts"]) if s["alerts"] else ""
+        note = notes.get(s["merchant"].lower(), "")
+        note_html = f"<br><small style='color:#4e79a7;font-style:italic'>Note: {note}</small>" if note else ""
         sub_rows += f"""<tr>
-            <td><strong>{s['merchant']}</strong>{('<br>' + alert_html) if alert_html else ''}</td>
+            <td><strong>{s['merchant']}</strong>{('<br>' + alert_html) if alert_html else ''}{note_html}</td>
             <td style="text-align:right">{money(s['avg'])}</td>
             {month_cells}
             <td style="text-align:center">{status_badge(s['status'])}</td>
@@ -650,22 +999,34 @@ def generate_html(data: dict, ai_html: str | None = None) -> str:
     # Top merchants table
     top_rows = ""
     for i, (m, t, c) in enumerate(data["top_merchants"], 1):
-        top_rows += f"<tr><td>{i}</td><td>{m}</td><td style='text-align:right'>{money(t)}</td><td style='text-align:center'>{c}</td></tr>"
+        note = notes.get(m.lower(), "")
+        note_html = f"<br><small style='color:#4e79a7;font-style:italic'>{note}</small>" if note else ""
+        top_rows += f"<tr><td>{i}</td><td>{m}{note_html}</td><td style='text-align:right'>{money(t)}</td><td style='text-align:center'>{c}</td></tr>"
 
-    # Category table
+    # Category table with sparklines and budget bars
+    has_budgets = bool(budgets)
     cat_rows = ""
     for c, t, a, n in data["categories"]:
-        cat_rows += f"<tr><td>{c}</td><td style='text-align:right'>{money(t)}</td><td style='text-align:right'>{money(a)}</td><td style='text-align:center'>{n}</td></tr>"
+        monthly_vals = [data["category_monthly"].get(c, {}).get(m, 0) for m in months]
+        spark = sparkline(monthly_vals)
+        budget_cell = ""
+        if has_budgets:
+            target = budgets.get(c)
+            no_budget = '<span style="color:#ccc">—</span>'
+            budget_cell = f"<td>{budget_bar(a, target) if target else no_budget}</td>"
+        cat_rows += f"<tr><td>{c}</td><td style='text-align:right'>{money(t)}</td><td style='text-align:right'>{money(a)}</td>{budget_cell}<td style='text-align:center'>{spark}</td><td style='text-align:center'>{n}</td></tr>"
 
-    # Monthly detail sections
+    # Monthly detail sections (last 3 months only)
     monthly_sections = ""
-    for m in months:
+    recent_months = months[-3:]
+    for m in recent_months:
         label = datetime.strptime(m, "%Y-%m").strftime("%B %Y")
         txns = data["monthly_txns"][m]
         m_total = data["monthly_totals"][m]
         txn_rows = ""
         for t in txns:
-            txn_rows += f"<tr><td>{t['date'].strftime('%b %d')}</td><td>{t['merchant']}</td><td style='color:#888;font-size:0.85em'>{t['category']}</td><td style='text-align:right'>{money(t['amount'])}</td></tr>"
+            source_tag = f" <small style='color:#76b7b2'>[D]</small>" if t.get("source") == "debit" else ""
+            txn_rows += f"<tr><td>{t['date'].strftime('%b %d')}</td><td>{t['merchant']}{source_tag}</td><td style='color:#888;font-size:0.85em'>{t['category']}</td><td style='text-align:right'>{money(t['amount'])}</td></tr>"
         monthly_sections += f"""
         <details class="month-detail">
             <summary><strong>{label}</strong> — {money(m_total)} ({len(txns)} transactions)</summary>
@@ -679,8 +1040,15 @@ def generate_html(data: dict, ai_html: str | None = None) -> str:
     sub_month_headers = "".join(f"<th style='text-align:right'>{datetime.strptime(m, '%Y-%m').strftime('%b %Y')}</th>" for m in months)
 
     # Trend indicator
-    trend_arrow = "↑" if data["mom_change"] > 0 else "↓" if data["mom_change"] < 0 else "→"
+    trend_arrow = "\u2191" if data["mom_change"] > 0 else "\u2193" if data["mom_change"] < 0 else "\u2192"
     trend_color = "#e74c3c" if data["mom_change"] > 5 else "#27ae60" if data["mom_change"] < -5 else "#f39c12"
+
+    # Fixed costs table rows
+    fixed_rows = ""
+    num_months = len(months)
+    for merchant, total_amt, by_month in fixed_detail:
+        monthly_avg = total_amt / num_months
+        fixed_rows += f"<tr><td>{merchant}</td><td style='text-align:right'>{money(total_amt)}</td><td style='text-align:right'>{money(monthly_avg)}</td></tr>"
 
     # AI section
     ai_section = ""
@@ -690,6 +1058,144 @@ def generate_html(data: dict, ai_html: str | None = None) -> str:
             <h2>AI-Powered Recommendations</h2>
             <div class="ai-recommendations">{ai_html}</div>
         </section>"""
+
+    # ── Overview stats ──
+    overview_stats = f"""
+    <div class="stat"><div class="value">{money(data['total'])}</div><div class="label">Total Spend</div></div>
+    <div class="stat"><div class="value">{money(data['monthly_avg'])}</div><div class="label">Monthly Average</div></div>"""
+    if has_income:
+        overview_stats += f"""
+    <div class="stat"><div class="value" style="color:#27ae60">{money(avg_income)}</div><div class="label">Avg Monthly Income</div></div>
+    <div class="stat"><div class="value" style="color:{'#27ae60' if avg_savings_rate > 0 else '#e74c3c'}">{avg_savings_rate}%</div><div class="label">Avg Savings Rate</div></div>"""
+    else:
+        overview_stats += f"""
+    <div class="stat"><div class="value" style="color:{trend_color}">{trend_arrow} {abs(data['mom_change'])}%</div><div class="label">Month-over-Month</div></div>
+    <div class="stat"><div class="value">{len(data['subscriptions'])}</div><div class="label">Recurring Charges</div></div>"""
+    if debt_payoff_total > 0:
+        overview_stats += f"""
+    <div class="stat"><div class="value" style="color:#27ae60">{money(debt_payoff_total)}</div><div class="label">Debt Paid Off</div></div>"""
+
+    # ── Debt Freedom section ──
+    debt_section = ""
+    if debt_payoffs:
+        # Group payoffs by merchant
+        from collections import defaultdict as _dd
+        payoff_by_merchant = _dd(lambda: {"total": 0.0, "last_date": None})
+        for d in debt_payoffs:
+            payoff_by_merchant[d["merchant"]]["total"] += d["amount"]
+            dt = d["date"]
+            prev = payoff_by_merchant[d["merchant"]]["last_date"]
+            if prev is None or dt > prev:
+                payoff_by_merchant[d["merchant"]]["last_date"] = dt
+        debt_rows = ""
+        for merchant, info in sorted(payoff_by_merchant.items(), key=lambda x: x[1]["total"], reverse=True):
+            rate = INTEREST_RATES.get(merchant, 0)
+            annual_saved = info["total"] * rate
+            paid_off_date = info["last_date"].strftime("%b %Y")
+            debt_rows += f"<tr><td>{merchant}</td><td style='text-align:right'>{money(info['total'])}</td><td style='text-align:center'>{rate*100:.2f}%</td><td style='text-align:right'>{money(annual_saved)}</td><td style='text-align:center'>{paid_off_date}</td></tr>"
+        monthly_saved = annual_interest_saved / 12
+        debt_section = f"""
+<section id="debt-freedom" class="card">
+    <h2>Debt Freedom</h2>
+    <p style="color:var(--muted);margin-bottom:15px">Debts paid off during this period — saving <strong style="color:#27ae60">{money(annual_interest_saved)}/year</strong> ({money(monthly_saved)}/month) in interest</p>
+    <table class="data-table" style="max-width:700px">
+        <thead><tr><th>Debt</th><th style="text-align:right">Principal</th><th style="text-align:center">Rate</th><th style="text-align:right">Annual Savings</th><th style="text-align:center">Paid Off</th></tr></thead>
+        <tbody>{debt_rows}</tbody>
+        <tfoot><tr style="font-weight:700"><td>Total</td><td style="text-align:right">{money(debt_payoff_total)}</td><td></td><td style="text-align:right">{money(annual_interest_saved)}</td><td></td></tr></tfoot>
+    </table>
+</section>"""
+
+    # ── Fixed vs Discretionary section ──
+    fixed_section = ""
+    if fixed_detail:
+        fixed_section = f"""
+<section id="fixed-discretionary" class="card">
+    <h2>Fixed vs Discretionary</h2>
+    <p style="color:var(--muted);margin-bottom:15px">{fixed_pct}% of total spending is fixed (pre-authorized recurring debits)</p>
+    <div class="chart-row">
+        <div>
+            <table class="data-table">
+                <thead><tr><th>Fixed Cost</th><th style="text-align:right">Total</th><th style="text-align:right">Monthly Avg</th></tr></thead>
+                <tbody>{fixed_rows}</tbody>
+                <tfoot><tr style="font-weight:700"><td>Total Fixed</td><td style="text-align:right">{money(fixed_total)}</td><td style="text-align:right">{money(fixed_total / num_months if num_months else 0)}</td></tr></tfoot>
+            </table>
+        </div>
+        <div>
+            <div class="chart-container"><canvas id="fixedChart"></canvas></div>
+        </div>
+    </div>
+</section>"""
+
+    # ── TOC links ──
+    toc_items = '<li><a href="#overview">Overview</a></li>'
+    if debt_payoffs:
+        toc_items += '\n    <li><a href="#debt-freedom">Debt Freedom</a></li>'
+    toc_items += '\n    <li><a href="#charts">Charts</a></li>'
+    if fixed_detail:
+        toc_items += '\n    <li><a href="#fixed-discretionary">Fixed vs Discretionary</a></li>'
+    toc_items += '\n    <li><a href="#categories">Categories</a></li>'
+    toc_items += '\n    <li><a href="#subscriptions">Subscriptions</a></li>'
+    if ai_html:
+        toc_items += '\n    <li><a href="#recommendations">AI Recommendations</a></li>'
+    toc_items += '\n    <li><a href="#top-merchants">Top Merchants</a></li>'
+    toc_items += '\n    <li><a href="#monthly-detail">Monthly Detail</a></li>'
+
+    # ── Chart.js for stacked monthly bar ──
+    if has_debit:
+        monthly_chart_js = f"""
+    new Chart(document.getElementById('monthlyChart'), {{
+        type: 'bar',
+        data: {{
+            labels: {month_labels_json},
+            datasets: [
+                {{ label: 'Credit Card', data: {credit_monthly}, backgroundColor: '#4e79a7', borderRadius: 4 }},
+                {{ label: 'Debit Card', data: {debit_monthly}, backgroundColor: '#76b7b2', borderRadius: 4 }}
+            ]
+        }},
+        options: {{
+            responsive: true,
+            plugins: {{
+                tooltip: {{ callbacks: {{ label: ctx => ctx.dataset.label + ': $' + ctx.parsed.y.toLocaleString(undefined, {{minimumFractionDigits:2}}) }} }}
+            }},
+            scales: {{
+                x: {{ stacked: true }},
+                y: {{ stacked: true, beginAtZero: true, ticks: {{ callback: v => '$' + (v/1000).toFixed(0) + 'k' }} }}
+            }}
+        }}
+    }});"""
+    else:
+        monthly_chart_js = f"""
+    new Chart(document.getElementById('monthlyChart'), {{
+        type: 'bar',
+        data: {{
+            labels: {month_labels_json},
+            datasets: [{{ label: 'Monthly Spend', data: {monthly_values}, backgroundColor: '#4e79a7', borderRadius: 6 }}]
+        }},
+        options: {{
+            responsive: true,
+            plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: ctx => '$' + ctx.parsed.y.toLocaleString(undefined, {{minimumFractionDigits:2}}) }} }} }},
+            scales: {{ y: {{ beginAtZero: true, ticks: {{ callback: v => '$' + (v/1000).toFixed(0) + 'k' }} }} }}
+        }}
+    }});"""
+
+    # ── Chart.js for fixed/discretionary pie ──
+    fixed_chart_js = ""
+    if fixed_detail:
+        fixed_chart_js = f"""
+    new Chart(document.getElementById('fixedChart'), {{
+        type: 'doughnut',
+        data: {{
+            labels: ['Fixed Costs', 'Discretionary'],
+            datasets: [{{ data: [{fixed_total}, {discretionary_total}], backgroundColor: ['#4e79a7', '#76b7b2'], borderWidth: 2, borderColor: '#fff' }}]
+        }},
+        options: {{
+            responsive: true,
+            plugins: {{
+                legend: {{ position: 'bottom' }},
+                tooltip: {{ callbacks: {{ label: ctx => ctx.label + ': $' + ctx.parsed.toLocaleString(undefined, {{minimumFractionDigits:2}}) }} }}
+            }}
+        }}
+    }});"""
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -741,48 +1247,41 @@ nav.toc a:hover {{ background: var(--accent); color: #fff; }}
 </head>
 <body>
 <h1>Expense Dashboard</h1>
-<p class="subtitle">Credit card spending analysis: {month_labels[0]} – {month_labels[-1]} | Generated {datetime.now().strftime('%b %d, %Y at %I:%M %p')}</p>
+<p class="subtitle">Household spending analysis: {month_labels[0]} – {month_labels[-1]} | Generated {datetime.now().strftime('%b %d, %Y at %I:%M %p')}</p>
 
 <nav class="toc"><ul>
-    <li><a href="#overview">Overview</a></li>
-    <li><a href="#charts">Charts</a></li>
-    <li><a href="#categories">Categories</a></li>
-    <li><a href="#subscriptions">Subscriptions</a></li>
-    {'<li><a href="#recommendations">AI Recommendations</a></li>' if ai_html else ''}
-    <li><a href="#top-merchants">Top Merchants</a></li>
-    <li><a href="#monthly-detail">Monthly Detail</a></li>
+    {toc_items}
 </ul></nav>
 
 <!-- Overview Stats -->
 <div id="overview"></div>
 <div class="stats">
-    <div class="stat"><div class="value">{money(data['total'])}</div><div class="label">Total Spend</div></div>
-    <div class="stat"><div class="value">{money(data['monthly_avg'])}</div><div class="label">Monthly Average</div></div>
-    <div class="stat"><div class="value" style="color:{trend_color}">{trend_arrow} {abs(data['mom_change'])}%</div><div class="label">Month-over-Month</div></div>
-    <div class="stat"><div class="value">{len(data['subscriptions'])}</div><div class="label">Recurring Charges</div></div>
+    {overview_stats}
 </div>
+
+{debt_section}
 
 <!-- Charts -->
 <div id="charts" class="chart-row">
     <div class="card">
-        <h2>Monthly Spending</h2>
+        <h2>Monthly Spending{' (Credit + Debit)' if has_debit else ''}</h2>
         <div class="chart-container"><canvas id="monthlyChart"></canvas></div>
-        <noscript><table class="data-table noscript-table"><thead><tr><th>Month</th><th>Amount</th></tr></thead><tbody>{''.join(f'<tr><td>{ml}</td><td style="text-align:right">{money(data["monthly_totals"][m])}</td></tr>' for m, ml in zip(months, month_labels))}</tbody></table></noscript>
     </div>
     <div class="card">
         <h2>Category Breakdown</h2>
         <div class="chart-container"><canvas id="categoryChart"></canvas></div>
-        <noscript><table class="data-table noscript-table"><thead><tr><th>Category</th><th>Amount</th></tr></thead><tbody>{''.join(f'<tr><td>{c[0]}</td><td style="text-align:right">{money(c[1])}</td></tr>' for c in data["categories"])}</tbody></table></noscript>
     </div>
 </div>
+
+{fixed_section}
 
 <!-- Category Table -->
 <section id="categories" class="card">
     <h2>Category Breakdown</h2>
     <table class="data-table">
-        <thead><tr><th>Category</th><th style="text-align:right">Total</th><th style="text-align:right">Monthly Avg</th><th style="text-align:center">Transactions</th></tr></thead>
+        <thead><tr><th>Category</th><th style="text-align:right">Total</th><th style="text-align:right">Monthly Avg</th>{'<th>vs Budget</th>' if has_budgets else ''}<th style="text-align:center">Trend</th><th style="text-align:center">Txns</th></tr></thead>
         <tbody>{cat_rows}</tbody>
-        <tfoot><tr style="font-weight:700"><td>Total</td><td style="text-align:right">{money(data['total'])}</td><td style="text-align:right">{money(data['monthly_avg'])}</td><td></td></tr></tfoot>
+        <tfoot><tr style="font-weight:700"><td>Total</td><td style="text-align:right">{money(data['total'])}</td><td style="text-align:right">{money(data['monthly_avg'])}</td>{'<td></td>' if has_budgets else ''}<td></td><td></td></tr></tfoot>
     </table>
 </section>
 
@@ -820,32 +1319,8 @@ nav.toc a:hover {{ background: var(--accent); color: #fff; }}
 document.addEventListener('DOMContentLoaded', function() {{
     if (typeof Chart === 'undefined') return;
 
-    // Monthly bar chart
-    new Chart(document.getElementById('monthlyChart'), {{
-        type: 'bar',
-        data: {{
-            labels: {month_labels_json},
-            datasets: [{{
-                label: 'Monthly Spend',
-                data: {monthly_values},
-                backgroundColor: '#4e79a7',
-                borderRadius: 6,
-            }}]
-        }},
-        options: {{
-            responsive: true,
-            plugins: {{
-                legend: {{ display: false }},
-                tooltip: {{ callbacks: {{ label: ctx => '$' + ctx.parsed.y.toLocaleString(undefined, {{minimumFractionDigits:2}}) }} }}
-            }},
-            scales: {{
-                y: {{
-                    beginAtZero: true,
-                    ticks: {{ callback: v => '$' + (v/1000).toFixed(0) + 'k' }}
-                }}
-            }}
-        }}
-    }});
+    // Monthly spending bar chart
+    {monthly_chart_js}
 
     // Category donut chart
     new Chart(document.getElementById('categoryChart'), {{
@@ -867,6 +1342,8 @@ document.addEventListener('DOMContentLoaded', function() {{
             }}
         }}
     }});
+
+    {fixed_chart_js}
 }});
 </script>
 
@@ -893,18 +1370,34 @@ def main():
     global _user_categories
     _user_categories = load_user_categories(folder)
 
-    transactions = parse_csvs(folder)
+    # Load notes and budgets
+    user_notes = load_notes(folder)
+    user_budgets = load_budgets(folder)
+
+    transactions, debt_payoffs = parse_csvs(folder)
     print(f"Loaded {len(transactions)} transactions")
 
-    data = analyze(transactions)
+    # Extract income and transfer data from debit card CSVs
+    income = extract_income(folder)
+    transfers = extract_transfers(folder)
+    if income:
+        total_inc = sum(income.values())
+        print(f"Found income data: ${total_inc:,.2f} across {len(income)} months")
+    if transfers:
+        print(f"Found transfer data across {len(transfers)} months")
+
+    data = analyze(transactions, income=income, transfers=transfers,
+                   debt_payoffs=debt_payoffs)
     print(f"Total spend: ${data['total']:,.2f} across {len(data['months'])} months")
     print(f"Found {len(data['subscriptions'])} recurring charges")
+    if data.get("fixed_cost_detail"):
+        print(f"Fixed costs: ${data['fixed_total']:,.2f} | Discretionary: ${data['discretionary_total']:,.2f}")
 
     ai_html = None
     if args.ai:
         ai_html = get_ai_recommendations(data)
 
-    html = generate_html(data, ai_html)
+    html = generate_html(data, ai_html, notes=user_notes, budgets=user_budgets)
     output_path = os.path.join(folder, "dashboard.html")
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html)
