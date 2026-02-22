@@ -2,3 +2,12 @@
 __pycache__/
 run-dashboard.sh
 
+# Generated output
+dashboard.html
+
+# Financial data (PII) — statements, transactions, investments
+*.pdf
+credit card/
+debit card/
+corporate/
+investments/
