@@ -630,14 +630,18 @@ def extract_passive_income(folder: str) -> dict | None:
 
     accessible_yield = sum(a["annual_yield"] for a in accessible)
     rrsp_yield = sum(a["annual_yield"] for a in rrsp)
+    accessible_balance = sum(a["value"] for a in accessible)
+    rrsp_balance = sum(a["value"] for a in rrsp)
 
     return {
         "annual_income": round(accessible_yield, 2),
         "monthly_income": round(accessible_yield / 12, 2),
         "accounts": sorted(accessible, key=lambda a: a["annual_yield"], reverse=True),
+        "accessible_balance": round(accessible_balance, 2),
         "rrsp_annual": round(rrsp_yield, 2),
         "rrsp_monthly": round(rrsp_yield / 12, 2),
         "rrsp_accounts": sorted(rrsp, key=lambda a: a["annual_yield"], reverse=True),
+        "rrsp_balance": round(rrsp_balance, 2),
     }
 
 
@@ -948,7 +952,8 @@ def analyze(transactions: list[dict], transfers: dict | None = None,
 
 # ── AI Recommendations ──────────────────────────────────────────────────────
 
-def get_ai_recommendations(data: dict) -> str | None:
+def get_ai_recommendations(data: dict, passive_income: dict | None = None,
+                           corporate_income: dict | None = None) -> str | None:
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         print("Error: ANTHROPIC_API_KEY environment variable not set.")
@@ -983,25 +988,126 @@ def get_ai_recommendations(data: dict) -> str | None:
         "discretionary_total": data.get("discretionary_total", 0),
     }
 
-    prompt = f"""Analyze this household spending data (credit card + debit card combined) and provide actionable recommendations.
+    # Passive investment income
+    if passive_income:
+        summary["passive_income"] = {
+            "annual_yield": passive_income["annual_income"],
+            "monthly_income": passive_income["monthly_income"],
+            "account_count": len(passive_income["accounts"]),
+            "accessible_balance": passive_income.get("accessible_balance", 0),
+            "rrsp_annual": passive_income.get("rrsp_annual", 0),
+            "rrsp_monthly": passive_income.get("rrsp_monthly", 0),
+            "rrsp_balance": passive_income.get("rrsp_balance", 0),
+        }
 
-The data includes income, fixed costs (tuition, car payment, utilities), and discretionary spending. Savings rate is calculated where income data is available.
+    # Corporate income
+    if corporate_income:
+        rev = corporate_income["revenue_monthly"]
+        div = corporate_income["dividends_monthly"]
+        rev_months = sorted(rev.keys())
+        div_months = sorted(div.keys())
+
+        # Trailing 3-month averages
+        rev_last3 = [rev[m] for m in rev_months[-3:]] if len(rev_months) >= 3 else list(rev.values())
+        div_last3 = [div[m] for m in div_months[-3:]] if len(div_months) >= 3 else list(div.values())
+        rev_avg3 = round(sum(rev_last3) / len(rev_last3), 2) if rev_last3 else 0
+        div_avg3 = round(sum(div_last3) / len(div_last3), 2) if div_last3 else 0
+
+        take_home_rate = 0.60
+        summary["corporate_income"] = {
+            "revenue_monthly": rev,
+            "dividends_monthly": div,
+            "revenue_total": corporate_income["revenue_total"],
+            "dividends_total": corporate_income["dividends_total"],
+            "revenue_avg_last3": rev_avg3,
+            "dividends_avg_last3": div_avg3,
+            "take_home_rate": take_home_rate,
+            "estimated_take_home_monthly": round(rev_avg3 * take_home_rate + div_avg3, 2),
+        }
+
+        # Revenue trend: latest vs prior month
+        if len(rev_months) >= 2:
+            latest_rev = rev[rev_months[-1]]
+            prior_rev = rev[rev_months[-2]]
+            if prior_rev > 0:
+                decline_pct = round((prior_rev - latest_rev) / prior_rev * 100, 1)
+                summary["revenue_trend"] = {
+                    "latest_month": rev_months[-1],
+                    "latest_revenue": latest_rev,
+                    "prior_month": rev_months[-2],
+                    "prior_revenue": prior_rev,
+                    "change_pct": -decline_pct if latest_rev < prior_rev else round((latest_rev - prior_rev) / prior_rev * 100, 1),
+                }
+
+    # Burn rate & coverage — exclude paid-off debt merchant payments
+    monthly_totals = data.get("monthly_totals", {})
+    monthly_txns = data.get("monthly_txns", {})
+    debt_payoff_merchants = set(DEBT_PAYOFF_THRESHOLDS.keys()) if data.get("debt_payoffs") else set()
+    spend_months = sorted(monthly_totals.keys())
+    adjusted = {}
+    for m in spend_months:
+        m_total = monthly_totals.get(m, 0)
+        if debt_payoff_merchants:
+            debt_in_month = sum(t["amount"] for t in monthly_txns.get(m, [])
+                                if t["merchant"] in debt_payoff_merchants)
+            m_total -= debt_in_month
+        adjusted[m] = m_total
+    if len(spend_months) >= 3:
+        burn_rate = round(sum(adjusted[m] for m in spend_months[-3:]) / 3, 2)
+    elif spend_months:
+        burn_rate = round(sum(adjusted.values()) / len(spend_months), 2)
+    else:
+        burn_rate = 0
+
+    combined_monthly = 0.0
+    if passive_income:
+        combined_monthly += passive_income["monthly_income"]
+    if corporate_income and "estimated_take_home_monthly" in summary.get("corporate_income", {}):
+        combined_monthly += summary["corporate_income"]["estimated_take_home_monthly"]
+
+    coverage_pct = round(combined_monthly / burn_rate * 100, 1) if burn_rate > 0 else 0
+    accessible_balance = passive_income.get("accessible_balance", 0) if passive_income else 0
+    net_monthly_draw = max(burn_rate - combined_monthly, 0)
+    runway_months = round(accessible_balance / net_monthly_draw, 1) if net_monthly_draw > 0 else None
+    summary["burn_rate_coverage"] = {
+        "burn_rate_monthly": burn_rate,
+        "combined_monthly_income": round(combined_monthly, 2),
+        "coverage_pct": coverage_pct,
+        "monthly_surplus_or_gap": round(combined_monthly - burn_rate, 2),
+        "accessible_savings": accessible_balance,
+        "runway_months": runway_months,
+    }
+
+    # Debts already paid off during this period (no longer owed)
+    debt_payoffs = data.get("debt_payoffs", [])
+    if debt_payoffs:
+        summary["debts_paid_off"] = {
+            "total_eliminated": round(sum(d["amount"] for d in debt_payoffs), 2),
+            "note": "These debts have already been fully paid off during this period. They are NOT outstanding balances.",
+        }
+
+    prompt = f"""Analyze this personal & corporate financial dashboard and provide actionable recommendations.
+
+Context: This dashboard covers a self-employed consultant pursuing financial sustainability, defined as: passive income >= burn rate. Income comes from three streams: (1) passive portfolio yield from personal investments — this is the SUSTAINABLE income, (2) corporate consulting revenue (Tall Tree Technology) at ~60% take-home after tax/expenses — this is ACTIVE income that bridges the gap, and (3) corporate dividend income (Britton Holdings). The "burn_rate_coverage" section shows how much of the burn rate is covered by passive income alone — coverage_pct is passive-only. Corporate income bridges the remaining gap but is not considered sustainable. "accessible_savings" is the total balance in Non-registered, Cash, and TFSA accounts that can be drawn without tax penalty; "runway_months" shows how long savings last if all income stopped (null if passive income already covers expenses). Revenue trend shows month-over-month changes in consulting income. "debts_paid_off" lists debts that were fully eliminated during this period — these are no longer owed and should be celebrated, not treated as outstanding obligations. The spending data includes fixed costs (tuition, car payment, utilities) and discretionary spending across credit and debit cards.
 
 DATA:
 {json.dumps(summary, indent=2)}
 
-Please provide exactly 10 numbered recommendations — no more, no less. Each should be specific, actionable, and reference actual merchant names and dollar amounts from the data. Cover a mix of:
+Provide a MAXIMUM of 5 recommendations — no more than 5. Each should be specific, actionable, and reference actual numbers and merchant names from the data. Prioritize the most impactful insights from:
+- Sustainability gap (passive income vs burn rate — what would close the gap: higher yield, lower burn, or both)
+- Corporate bridge risk (revenue trend, client concentration — what happens if this bridge narrows)
+- Portfolio income observations (yield adequacy, RRSP vs accessible allocation, how to grow passive income)
+- Corporate tax optimization (take-home rate, dividend timing, reinvesting to grow passive income)
 - Fixed cost optimization (insurance, utilities, recurring debits)
 - Subscription cost-saving actions (price increases to negotiate, services to cancel/downgrade)
 - Spending pattern optimizations (consolidation, alternatives)
-- Income and savings rate observations
 - Notable month-over-month changes worth investigating
 
-Format your response in clean HTML as a single <ol> list with 10 <li> items. Use <strong> for emphasis on merchant names and dollar amounts. Be concise — one short paragraph per recommendation."""
+Format your response in clean HTML as a single <ol> list with at most 5 <li> items. Use <strong> for emphasis on merchant names and dollar amounts. Be concise — one short paragraph per recommendation."""
 
     payload = json.dumps({
-        "model": "claude-sonnet-4-20250514",
-        "max_tokens": 2000,
+        "model": "claude-sonnet-4-6",
+        "max_tokens": 3000,
         "messages": [{"role": "user", "content": prompt}],
     }).encode("utf-8")
 
@@ -1131,18 +1237,31 @@ def generate_html(data: dict, ai_html: str | None = None,
         d["amount"] * INTEREST_RATES.get(d["merchant"], 0) for d in debt_payoffs
     )
 
-    # Burn rate — recent 3-month average, excluding paid-off debt payments
+    # Adjusted totals — exclude paid-off debt merchant payments consistently
     debt_merchants = set(DEBT_PAYOFF_THRESHOLDS.keys()) if debt_payoffs else set()
-    recent_months = months[-3:]
-    recent_adjusted = []
-    for m in recent_months:
+    adjusted_monthly = {}
+    for m in months:
         m_total = data["monthly_totals"].get(m, 0)
         if debt_merchants:
             debt_in_month = sum(t["amount"] for t in data["monthly_txns"].get(m, [])
                                 if t["merchant"] in debt_merchants)
             m_total -= debt_in_month
-        recent_adjusted.append(m_total)
-    burn_rate = sum(recent_adjusted) / len(recent_adjusted) if recent_adjusted else 0
+        adjusted_monthly[m] = m_total
+
+    # Apply 2% VISA cash-back reduction to credit card spend
+    CASHBACK_RATE = 0.02
+    credit_by_month = source_breakdown.get("credit", {})
+    cashback_monthly = {m: round(credit_by_month.get(m, 0) * CASHBACK_RATE, 2) for m in months}
+    cashback_total = sum(cashback_monthly.values())
+    for m in months:
+        adjusted_monthly[m] -= cashback_monthly[m]
+
+    adjusted_total = sum(adjusted_monthly.values())
+    adjusted_avg = adjusted_total / len(months) if months else 0
+
+    # Burn rate — recent 3-month trailing average
+    recent_months = months[-3:]
+    burn_rate = sum(adjusted_monthly[m] for m in recent_months) / len(recent_months) if recent_months else 0
 
     # ── Build table rows ──
 
@@ -1257,58 +1376,78 @@ def generate_html(data: dict, ai_html: str | None = None,
     combined_monthly = monthly_passive + corp_monthly_takehome
     has_income = passive_income or corporate_income
 
-    if has_income and burn_rate > 0:
+    # Sustainability chart data
+    sustainability_burn = json.dumps([round(adjusted_monthly[m], 2) for m in months])
+    sustainability_passive = json.dumps([round(monthly_passive, 2)] * len(months))
+    sustainability_income = json.dumps([
+        round((corporate_income["revenue_monthly"].get(m, 0) * CORPORATE_TAKE_HOME_RATE
+               + corporate_income["dividends_monthly"].get(m, 0)), 2)
+        if corporate_income else 0
+        for m in months
+    ])
+    sustainability_combined = json.dumps([
+        round(monthly_passive
+              + (corporate_income["revenue_monthly"].get(m, 0) * CORPORATE_TAKE_HOME_RATE
+                 + corporate_income["dividends_monthly"].get(m, 0))
+              if corporate_income else monthly_passive, 2)
+        for m in months
+    ])
+
+    # Combined sustainability metrics (passive + corporate income vs burn rate)
+    if combined_monthly > 0 and burn_rate > 0:
         coverage_pct = combined_monthly / burn_rate * 100
-        gap = combined_monthly - burn_rate
+        sustainability_gap = combined_monthly - burn_rate
         if coverage_pct >= 100:
             coverage_color = "#27ae60"
-            coverage_label = f"Surplus: {money(gap)}/mo"
-        elif coverage_pct >= 75:
+            coverage_label = f"Surplus: {money(sustainability_gap)}/mo"
+        elif coverage_pct >= 50:
             coverage_color = "#f39c12"
-            coverage_label = f"Gap: {money(abs(gap))}/mo"
+            coverage_label = f"Gap: {money(abs(sustainability_gap))}/mo to sustainability"
         else:
             coverage_color = "#e74c3c"
-            coverage_label = f"Gap: {money(abs(gap))}/mo"
+            coverage_label = f"Gap: {money(abs(sustainability_gap))}/mo to sustainability"
     else:
         coverage_pct = 0
         coverage_color = "#95a5a6"
         coverage_label = ""
 
-    # Hero card: income vs burn rate
+    # Hero card: passive income vs burn rate
     hero_card = ""
+    accessible_balance = passive_income.get("accessible_balance", 0) if passive_income else 0
     if has_income:
         bar_fill = min(coverage_pct, 100)
-        # Income breakdown lines
-        income_breakdown = ""
-        if monthly_passive > 0:
-            income_breakdown += f'<div style="font-size:0.82em;color:var(--muted);margin-top:4px">Personal passive: {money(monthly_passive)}/mo <span style="color:#76b7b2">({money(annual_passive)}/yr)</span></div>'
-            income_breakdown += '<div style="font-size:0.75em;color:var(--muted);font-style:italic;margin-top:1px;margin-left:4px">projected portfolio yield</div>'
-        if corp_revenue_avg > 0:
-            income_breakdown += f'<div style="font-size:0.82em;color:var(--muted);margin-top:2px">Corporate revenue: {money(corp_revenue_avg)}/mo gross → {money(corp_revenue_takehome)}/mo est. take-home ({int(CORPORATE_TAKE_HOME_RATE*100)}%) <span style="color:#f28e2b">(Tall Tree)</span></div>'
-        if corp_div_avg > 0:
-            income_breakdown += f'<div style="font-size:0.82em;color:var(--muted);margin-top:2px">Corporate dividends: {money(corp_div_avg)}/mo <span style="color:#b07aa1">(Britton Holdings)</span></div>'
-        if corp_revenue_avg > 0 or corp_div_avg > 0:
-            income_breakdown += f'<div style="font-size:0.75em;color:var(--muted);font-style:italic;margin-top:1px;margin-left:4px">3-month trailing avg ({int(CORPORATE_TAKE_HOME_RATE*100)}% take-home on revenue)</div>'
-        rrsp_note = ""
-        if rrsp_annual > 0:
-            rrsp_note = f'<div style="font-size:0.82em;color:var(--muted);margin-top:6px">+ {money(rrsp_monthly)}/mo growing in RRSPs <span style="color:#b07aa1">({money(rrsp_annual)}/yr)</span></div>'
-        income_label = "Combined Income" if (monthly_passive > 0 and corp_monthly_takehome > 0) else "Accessible Investment Income" if monthly_passive > 0 else "Corporate Income"
+        # Savings runway line
+        savings_line = ""
+        if accessible_balance > 0 and burn_rate > 0:
+            net_draw = max(burn_rate - combined_monthly, 0)
+            if net_draw > 0:
+                runway = accessible_balance / net_draw
+                savings_line = f'<div style="font-size:0.85em;color:var(--muted);margin-top:4px">Accessible savings: {money(accessible_balance)} &middot; {runway:.0f} months runway</div>'
+            else:
+                savings_line = f'<div style="font-size:0.85em;color:var(--muted);margin-top:4px">Accessible savings: {money(accessible_balance)}</div>'
         hero_card = f"""
     <div class="card" style="margin-bottom:20px">
         <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:20px">
-            <div style="flex:1;min-width:200px">
-                <div style="font-size:0.85em;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">{income_label}</div>
-                <div style="font-size:2.2em;font-weight:700;color:#27ae60">{money(combined_monthly)}<span style="font-size:0.4em;font-weight:400;color:var(--muted)">/mo</span></div>
-                {income_breakdown}
-                {rrsp_note}
+            <div style="flex:1;min-width:160px">
+                <div style="font-size:0.85em;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Income</div>
+                <div style="font-size:2.2em;font-weight:700;color:#27ae60">{money(corp_monthly_takehome)}<span style="font-size:0.4em;font-weight:400;color:var(--muted)">/mo</span></div>
+                <div style="font-size:0.85em;color:var(--muted)">corporate take-home</div>
             </div>
-            <div style="flex:0 0 60px;text-align:center">
+            <div style="flex:0 0 40px;text-align:center">
+                <div style="font-size:1.8em;color:var(--muted)">+</div>
+            </div>
+            <div style="flex:1;min-width:160px;text-align:center">
+                <div style="font-size:0.85em;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Passive Income</div>
+                <div style="font-size:2.2em;font-weight:700;color:#27ae60">{money(monthly_passive)}<span style="font-size:0.4em;font-weight:400;color:var(--muted)">/mo</span></div>
+                <div style="font-size:0.85em;color:var(--muted)">portfolio yield</div>
+            </div>
+            <div style="flex:0 0 40px;text-align:center">
                 <div style="font-size:1.8em;color:var(--muted)">vs</div>
             </div>
-            <div style="flex:1;min-width:200px;text-align:right">
+            <div style="flex:1;min-width:160px;text-align:right">
                 <div style="font-size:0.85em;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Burn Rate</div>
                 <div style="font-size:2.2em;font-weight:700;color:#e15759">{money(burn_rate)}<span style="font-size:0.4em;font-weight:400;color:var(--muted)">/mo</span></div>
-                <div style="font-size:0.85em;color:var(--muted)">3-month trailing average</div>
+                <div style="font-size:0.85em;color:var(--muted)">3-month trailing avg (net of 2% cash-back)</div>
             </div>
         </div>
         <div style="margin-top:20px">
@@ -1319,17 +1458,22 @@ def generate_html(data: dict, ai_html: str | None = None,
             <div style="background:#eee;border-radius:6px;height:12px;overflow:hidden">
                 <div style="width:{bar_fill:.0f}%;background:{coverage_color};height:100%;border-radius:6px;transition:width 0.3s"></div>
             </div>
+            {savings_line}
         </div>
     </div>"""
 
     # ── Overview stats ──
     overview_stats = f"""
-    <div class="stat"><div class="value">{money(data['total'])}</div><div class="label">Total Spend ({len(months)} months)</div></div>
-    <div class="stat"><div class="value">{money(data['monthly_avg'])}</div><div class="label">Monthly Average</div></div>
+    <div class="stat"><div class="value">{money(adjusted_total)}</div><div class="label">Total Spend ({len(months)} months)</div></div>
+    <div class="stat"><div class="value">{money(adjusted_avg)}</div><div class="label">Monthly Average</div></div>
     <div class="stat"><div class="value" style="color:{trend_color}">{trend_arrow} {abs(data['mom_change']):.0f}%</div><div class="label">3-Month Trend</div></div>"""
     if debt_payoff_total > 0:
         overview_stats += f"""
     <div class="stat"><div class="value" style="color:#27ae60">{money(debt_payoff_total)}</div><div class="label">Debt Paid Off</div></div>"""
+
+    if cashback_total > 0:
+        overview_stats += f"""
+    <div class="stat"><div class="value" style="color:#27ae60">{money(cashback_total)}</div><div class="label">VISA Cash-Back ({len(months)} months)</div></div>"""
 
     # ── Debt Freedom section ──
     debt_section = ""
@@ -1423,16 +1567,22 @@ def generate_html(data: dict, ai_html: str | None = None,
 </section>"""
 
     # ── TOC links ──
+    # The Big Picture
     toc_items = '<li><a href="#overview">Overview</a></li>'
+    toc_items += '\n    <li><a href="#sustainability">Sustainability</a></li>'
+    # Income
     if corporate_income:
         toc_items += '\n    <li><a href="#corporate-income">Corporate Income</a></li>'
-    if debt_payoffs:
-        toc_items += '\n    <li><a href="#debt-freedom">Debt Freedom</a></li>'
+    # Spending Analysis
     toc_items += '\n    <li><a href="#charts">Charts</a></li>'
     if fixed_detail:
         toc_items += '\n    <li><a href="#fixed-discretionary">Fixed vs Discretionary</a></li>'
     toc_items += '\n    <li><a href="#categories">Categories</a></li>'
     toc_items += '\n    <li><a href="#subscriptions">Subscriptions</a></li>'
+    # Milestones
+    if debt_payoffs:
+        toc_items += '\n    <li><a href="#debt-freedom">Debt Freedom</a></li>'
+    # Deep Dives
     if ai_html:
         toc_items += '\n    <li><a href="#recommendations">AI Recommendations</a></li>'
     toc_items += '\n    <li><a href="#top-merchants">Top Merchants</a></li>'
@@ -1532,9 +1682,11 @@ h2 {{ font-size: 1.3em; margin-bottom: 15px; color: var(--accent); border-bottom
 .month-detail summary:hover {{ background: #e8ecf1; }}
 .month-detail[open] summary {{ border-radius: 8px 8px 0 0; }}
 .month-detail .data-table {{ border: 1px solid var(--border); border-top: none; }}
-.ai-recommendations {{ line-height: 1.7; }}
-.ai-recommendations h3 {{ color: var(--accent); margin: 20px 0 10px; }}
-.ai-recommendations li {{ margin-bottom: 6px; }}
+.ai-recommendations {{ line-height: 1.6; }}
+.ai-recommendations ol {{ list-style: none; counter-reset: rec; padding: 0; margin: 0; }}
+.ai-recommendations li {{ counter-increment: rec; background: var(--bg); border-radius: 10px; padding: 16px 18px 16px 52px; margin-bottom: 12px; position: relative; border: 1px solid var(--border); }}
+.ai-recommendations li::before {{ content: counter(rec); position: absolute; left: 16px; top: 16px; width: 26px; height: 26px; background: var(--accent); color: #fff; border-radius: 50%; font-size: 0.82em; font-weight: 700; display: flex; align-items: center; justify-content: center; }}
+.ai-recommendations li:last-child {{ margin-bottom: 0; }}
 canvas {{ max-width: 100%; }}
 .noscript-table {{ margin-top: 10px; }}
 nav.toc {{ background: var(--card); border-radius: 12px; padding: 15px 25px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }}
@@ -1551,18 +1703,24 @@ nav.toc a:hover {{ background: var(--accent); color: #fff; }}
     {toc_items}
 </ul></nav>
 
-<!-- Overview -->
+<!-- ═══ THE BIG PICTURE ═══ -->
 <div id="overview"></div>
 {hero_card}
 <div class="stats">
     {overview_stats}
 </div>
 
+<!-- Sustainability Chart -->
+<section id="sustainability" class="card">
+    <h2>Monthly Sustainability</h2>
+    <p style="color:var(--muted);margin-bottom:15px">Income + passive income vs monthly burn — the gap to close for financial independence</p>
+    <div class="chart-container"><canvas id="sustainabilityChart"></canvas></div>
+</section>
+
+<!-- ═══ INCOME ═══ -->
 {corporate_section}
 
-{debt_section}
-
-<!-- Charts -->
+<!-- ═══ SPENDING ANALYSIS ═══ -->
 <div id="charts" class="chart-row">
     <div class="card">
         <h2>Monthly Spending{' (Credit + Debit)' if has_debit else ''}</h2>
@@ -1598,6 +1756,10 @@ nav.toc a:hover {{ background: var(--accent); color: #fff; }}
     </div>
 </section>
 
+<!-- ═══ MILESTONES ═══ -->
+{debt_section}
+
+<!-- ═══ DEEP DIVES ═══ -->
 {ai_section}
 
 <!-- Top Merchants -->
@@ -1645,6 +1807,67 @@ document.addEventListener('DOMContentLoaded', function() {{
     }});
 
     {fixed_chart_js}
+
+    // Sustainability chart — income + passive income vs monthly burn
+    new Chart(document.getElementById('sustainabilityChart'), {{
+        type: 'bar',
+        data: {{
+            labels: {month_labels_json},
+            datasets: [
+                {{
+                    label: 'Monthly Burn',
+                    data: {sustainability_burn},
+                    backgroundColor: '#e15759',
+                    borderRadius: 4,
+                    order: 4
+                }},
+                {{
+                    label: 'Income',
+                    data: {sustainability_income},
+                    type: 'line',
+                    borderColor: '#3498db',
+                    borderWidth: 2,
+                    pointBackgroundColor: '#3498db',
+                    pointRadius: 3,
+                    fill: false,
+                    order: 3
+                }},
+                {{
+                    label: 'Passive Income',
+                    data: {sustainability_passive},
+                    type: 'line',
+                    borderColor: '#27ae60',
+                    borderWidth: 2,
+                    borderDash: [6, 4],
+                    pointBackgroundColor: '#27ae60',
+                    pointRadius: 3,
+                    fill: false,
+                    order: 2
+                }},
+                {{
+                    label: 'Combined Income',
+                    data: {sustainability_combined},
+                    type: 'line',
+                    borderColor: '#2ecc71',
+                    borderWidth: 3,
+                    pointBackgroundColor: '#2ecc71',
+                    pointRadius: 4,
+                    fill: false,
+                    order: 1
+                }}
+            ]
+        }},
+        options: {{
+            responsive: true,
+            plugins: {{
+                legend: {{ display: true }},
+                tooltip: {{ callbacks: {{ label: ctx => ctx.dataset.label + ': $' + ctx.parsed.y.toLocaleString(undefined, {{minimumFractionDigits:2}}) }} }}
+            }},
+            scales: {{
+                y: {{ beginAtZero: true, ticks: {{ callback: v => '$' + (v/1000).toFixed(0) + 'k' }} }}
+            }}
+        }}
+    }});
 }});
 </script>
 
@@ -1702,7 +1925,8 @@ def main():
 
     ai_html = None
     if args.ai:
-        ai_html = get_ai_recommendations(data)
+        ai_html = get_ai_recommendations(data, passive_income=passive_income,
+                                          corporate_income=corporate_income)
 
     html = generate_html(data, ai_html, notes=user_notes, budgets=user_budgets,
                          passive_income=passive_income,
