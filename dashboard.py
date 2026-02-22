@@ -1566,9 +1566,61 @@ def generate_html(data: dict, ai_html: str | None = None,
     </table>
 </section>"""
 
+    # ── Passive Income section ──
+    passive_section = ""
+    if passive_income:
+        # Accessible accounts table rows
+        acc_rows = ""
+        for a in passive_income["accounts"]:
+            acc_rows += (
+                f"<tr><td>{a['account']}</td><td>{a['type']}</td>"
+                f"<td style='text-align:right'>{money(a['value'])}</td>"
+                f"<td style='text-align:right'>{money(a['annual_yield'])}</td></tr>"
+            )
+        acc_total_balance = passive_income["accessible_balance"]
+        acc_total_annual = passive_income["annual_income"]
+        acc_monthly = passive_income["monthly_income"]
+
+        # RRSP accounts table (optional)
+        rrsp_html = ""
+        if passive_income.get("rrsp_accounts"):
+            rrsp_rows = ""
+            for a in passive_income["rrsp_accounts"]:
+                rrsp_rows += (
+                    f"<tr><td>{a['account']}</td><td>{a['type']}</td>"
+                    f"<td style='text-align:right'>{money(a['value'])}</td>"
+                    f"<td style='text-align:right'>{money(a['annual_yield'])}</td></tr>"
+                )
+            rrsp_html = f"""
+    <h3 style="margin-top:30px">RRSP Accounts <span style="font-weight:400;color:var(--muted);font-size:0.85em">(tax-sheltered — not accessible without penalty)</span></h3>
+    <table class="data-table" style="max-width:700px">
+        <thead><tr><th>Account</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Annual Yield</th></tr></thead>
+        <tbody>{rrsp_rows}</tbody>
+        <tfoot>
+            <tr style="font-weight:700"><td colspan="2">Total RRSP</td><td style="text-align:right">{money(passive_income['rrsp_balance'])}</td><td style="text-align:right">{money(passive_income['rrsp_annual'])}</td></tr>
+            <tr style="color:var(--muted)"><td colspan="3">Monthly Income</td><td style="text-align:right">{money(passive_income['rrsp_monthly'])}</td></tr>
+        </tfoot>
+    </table>"""
+
+        passive_section = f"""
+<section id="passive-income" class="card">
+    <h2>Passive Income &amp; Accessible Savings</h2>
+    <p style="color:var(--muted);margin-bottom:15px">Yield from personal investment accounts — accessible balance breakdown</p>
+    <h3>Accessible Accounts</h3>
+    <table class="data-table" style="max-width:700px">
+        <thead><tr><th>Account</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Annual Yield</th></tr></thead>
+        <tbody>{acc_rows}</tbody>
+        <tfoot>
+            <tr style="font-weight:700"><td colspan="2">Total Accessible</td><td style="text-align:right">{money(acc_total_balance)}</td><td style="text-align:right">{money(acc_total_annual)}</td></tr>
+            <tr style="color:var(--muted)"><td colspan="3">Monthly Income</td><td style="text-align:right">{money(acc_monthly)}</td></tr>
+        </tfoot>
+    </table>
+    {rrsp_html}
+</section>"""
+
     # ── Tab buttons for conditional tabs ──
     income_tab_btn = ''
-    if corporate_income:
+    if corporate_income or passive_income:
         income_tab_btn = '<button data-tab="tab-income">Income</button>'
     milestones_tab_btn = ''
     if debt_payoffs:
@@ -1715,7 +1767,7 @@ canvas {{ max-width: 100%; }}
 </div>
 
 <!-- ═══ INCOME ═══ -->
-{'<div class="tab-panel" id="tab-income">' + corporate_section + '</div>' if corporate_income else ''}
+{'<div class="tab-panel" id="tab-income">' + corporate_section + passive_section + '</div>' if (corporate_income or passive_income) else ''}
 
 <!-- ═══ SPENDING ANALYSIS ═══ -->
 <div class="tab-panel" id="tab-spending">
@@ -1783,12 +1835,16 @@ document.addEventListener('DOMContentLoaded', function() {{
             document.querySelectorAll('.tab-nav button').forEach(function(b) {{ b.classList.remove('active'); }});
             document.querySelectorAll('.tab-panel').forEach(function(p) {{ p.classList.remove('active'); }});
             btn.classList.add('active');
-            document.getElementById(btn.dataset.tab).classList.add('active');
+            var panel = document.getElementById(btn.dataset.tab);
+            panel.classList.add('active');
+            // Defer chart resize to next frame so browser reflows display:block first
             if (typeof Chart !== 'undefined') {{
-                document.getElementById(btn.dataset.tab).querySelectorAll('canvas').forEach(function(c) {{
-                    var chart = Chart.getChart(c);
-                    if (chart) chart.resize();
-                }});
+                setTimeout(function() {{
+                    panel.querySelectorAll('canvas').forEach(function(c) {{
+                        var chart = Chart.getChart(c);
+                        if (chart) {{ chart.resize(); chart.update('none'); }}
+                    }});
+                }}, 50);
             }}
         }});
     }});
@@ -1825,50 +1881,39 @@ document.addEventListener('DOMContentLoaded', function() {{
 
     {fixed_chart_js}
 
-    // Sustainability chart — income + passive income vs monthly burn
+    // Sustainability chart — stacked area (income) vs burn line
     new Chart(document.getElementById('sustainabilityChart'), {{
-        type: 'bar',
+        type: 'line',
         data: {{
             labels: {month_labels_json},
             datasets: [
                 {{
-                    label: 'Monthly Burn',
-                    data: {sustainability_burn},
-                    backgroundColor: '#e15759',
-                    borderRadius: 4,
-                    order: 4
-                }},
-                {{
-                    label: 'Income',
-                    data: {sustainability_income},
-                    type: 'line',
-                    borderColor: '#3498db',
-                    borderWidth: 2,
-                    pointBackgroundColor: '#3498db',
-                    pointRadius: 3,
-                    fill: false,
+                    label: 'Combined Income',
+                    data: {sustainability_combined},
+                    borderColor: 'rgba(52,152,219,0.7)',
+                    backgroundColor: 'rgba(52,152,219,0.15)',
+                    borderWidth: 1,
+                    pointRadius: 0,
+                    fill: 'origin',
                     order: 3
                 }},
                 {{
                     label: 'Passive Income',
                     data: {sustainability_passive},
-                    type: 'line',
                     borderColor: '#27ae60',
-                    borderWidth: 2,
-                    borderDash: [6, 4],
-                    pointBackgroundColor: '#27ae60',
-                    pointRadius: 3,
-                    fill: false,
+                    backgroundColor: 'rgba(39,174,96,0.3)',
+                    borderWidth: 1,
+                    pointRadius: 0,
+                    fill: 'origin',
                     order: 2
                 }},
                 {{
-                    label: 'Combined Income',
-                    data: {sustainability_combined},
-                    type: 'line',
-                    borderColor: '#2ecc71',
+                    label: 'Monthly Burn',
+                    data: {sustainability_burn},
+                    borderColor: '#e15759',
                     borderWidth: 3,
-                    pointBackgroundColor: '#2ecc71',
-                    pointRadius: 4,
+                    pointBackgroundColor: '#e15759',
+                    pointRadius: 3,
                     fill: false,
                     order: 1
                 }}
@@ -1876,12 +1921,48 @@ document.addEventListener('DOMContentLoaded', function() {{
         }},
         options: {{
             responsive: true,
+            interaction: {{ mode: 'index', intersect: false }},
             plugins: {{
-                legend: {{ display: true }},
-                tooltip: {{ callbacks: {{ label: ctx => ctx.dataset.label + ': $' + ctx.parsed.y.toLocaleString(undefined, {{minimumFractionDigits:2}}) }} }}
+                legend: {{
+                    display: true,
+                    labels: {{
+                        usePointStyle: true,
+                        generateLabels: function(chart) {{
+                            const ds = chart.data.datasets;
+                            return [
+                                {{ text: 'Passive Income', fillStyle: 'rgba(39,174,96,0.3)', strokeStyle: '#27ae60', lineWidth: 1, pointStyle: 'rect' }},
+                                {{ text: 'Corporate Income', fillStyle: 'rgba(52,152,219,0.15)', strokeStyle: 'rgba(52,152,219,0.7)', lineWidth: 1, pointStyle: 'rect' }},
+                                {{ text: 'Monthly Burn', fillStyle: '#e15759', strokeStyle: '#e15759', lineWidth: 3, pointStyle: 'line' }}
+                            ];
+                        }}
+                    }}
+                }},
+                tooltip: {{
+                    callbacks: {{
+                        label: function(ctx) {{
+                            if (ctx.dataset.label === 'Combined Income') return null;
+                            return ctx.dataset.label + ': $' + ctx.parsed.y.toLocaleString(undefined, {{minimumFractionDigits:2}});
+                        }},
+                        afterBody: function(items) {{
+                            const combined = items.find(i => i.dataset.label === 'Combined Income');
+                            const burn = items.find(i => i.dataset.label === 'Monthly Burn');
+                            if (!combined || !burn) return '';
+                            const gap = (combined.parsed.y || 0) - (burn.parsed.y || 0);
+                            const sign = gap >= 0 ? '+' : '';
+                            return '  Combined: $' + (combined.parsed.y || 0).toLocaleString(undefined, {{minimumFractionDigits:2}})
+                                 + '\\n  Net: ' + sign + '$' + gap.toLocaleString(undefined, {{minimumFractionDigits:2}});
+                        }}
+                    }}
+                }}
             }},
             scales: {{
-                y: {{ beginAtZero: true, ticks: {{ callback: v => '$' + (v/1000).toFixed(0) + 'k' }} }}
+                y: {{
+                    beginAtZero: true,
+                    ticks: {{ callback: v => '$' + (v/1000).toFixed(0) + 'k' }}
+                }},
+                x: {{
+                    ticks: {{ maxRotation: 45 }}
+                }}
             }}
         }}
     }});
