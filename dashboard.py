@@ -746,6 +746,40 @@ def extract_passive_income(folder: str) -> dict | None:
             return None
         portfolio_path = csv_files[0]
 
+    # Build start-date lookup from Wealth CSV (if available but not the primary source)
+    # Key: (account_name_lower, brokerage_lower) for disambiguation
+    start_date_lookup = {}
+    wealth_csvs = glob.glob(os.path.join(invest_dir, "*Wealth*.csv"))
+    for wcsv in wealth_csvs:
+        if wcsv == portfolio_path:
+            continue  # skip if it's already the primary source
+        try:
+            with open(wcsv, newline="", encoding="utf-8-sig") as wf:
+                wreader = csv.reader(wf)
+                wheader = next(wreader)
+                wh = [c.strip().lower().replace("\n", " ") for c in wheader]
+                wsd_col = next((i for i, c in enumerate(wh) if "start date" in c), None)
+                if wsd_col is None:
+                    continue
+                for wrow in wreader:
+                    wname = wrow[0].strip().replace("\n", " ") if wrow else ""
+                    wbrokerage = wrow[1].strip().replace("\n", " ").lower() if len(wrow) > 1 else ""
+                    if not wname or wsd_col >= len(wrow):
+                        continue
+                    ds = wrow[wsd_col].strip()
+                    for fmt in ("%B %d, %Y", "%b %d, %Y", "%b %d %Y", "%Y-%m-%d"):
+                        try:
+                            parsed = datetime.strptime(ds, fmt).date()
+                            start_date_lookup[(wname.lower(), wbrokerage)] = parsed
+                            # Also store by name-only as fallback
+                            if wname.lower() not in start_date_lookup:
+                                start_date_lookup[wname.lower()] = parsed
+                            break
+                        except ValueError:
+                            continue
+        except Exception:
+            continue
+
     ACCESSIBLE_TYPES = {"Non-reg", "Cash", "TFSA"}  # spendable without tax penalty
 
     accessible = []
@@ -765,6 +799,8 @@ def extract_passive_income(folder: str) -> dict | None:
         col_value = next((i for i, c in enumerate(h) if "total" in c and "value" in c), 4)
         col_return = next((i for i, c in enumerate(h) if "return" in c), None)
         col_yield = next((i for i, c in enumerate(h) if "yield" in c), None)
+        col_start_date = next((i for i, c in enumerate(h) if "start date" in c), None)
+        col_brokerage = next((i for i, c in enumerate(h) if "brokerage" in c), 1)
 
         for row in reader:
             if len(row) <= max(col_account, col_type, col_value):
@@ -803,11 +839,28 @@ def extract_passive_income(folder: str) -> dict | None:
                 except (ValueError, TypeError):
                     annual_yield = 0.0
 
+            # Parse investment start date
+            start_date = None
+            if col_start_date is not None and col_start_date < len(row):
+                date_str = row[col_start_date].strip()
+                for fmt in ("%B %d, %Y", "%b %d, %Y", "%b %d %Y", "%Y-%m-%d"):
+                    try:
+                        start_date = datetime.strptime(date_str, fmt).date()
+                        break
+                    except ValueError:
+                        continue
+
+            # Fall back to Wealth CSV lookup if start_date not in primary source
+            if start_date is None:
+                brokerage = row[col_brokerage].strip().replace("\n", " ").lower() if col_brokerage < len(row) else ""
+                start_date = start_date_lookup.get((account.lower(), brokerage)) or start_date_lookup.get(account.lower())
+
             entry = {
                 "account": account,
                 "type": asset_type,
                 "value": total_value,
                 "annual_yield": round(annual_yield, 2),
+                "start_date": start_date,
             }
 
             # Route to appropriate bucket
@@ -1183,7 +1236,8 @@ def get_ai_recommendations(data: dict, passive_income: dict | None = None,
         "mom_change_pct": data["mom_change"],
         "monthly_totals": data["monthly_totals"],
         "categories": [
-            {"name": c, "total": t, "monthly_avg": a, "txn_count": n}
+            {"name": c, "total": t, "monthly_avg": a, "txn_count": n,
+             "monthly": {m: round(data["category_monthly"].get(c, {}).get(m, 0), 2) for m in data["months"][-6:]}}
             for c, t, a, n in data["categories"]
         ],
         "subscriptions": [
@@ -1203,16 +1257,34 @@ def get_ai_recommendations(data: dict, passive_income: dict | None = None,
         "discretionary_total": data.get("discretionary_total", 0),
     }
 
-    # Passive investment income
+    # Passive investment income — per-account detail for portfolio-specific advice
     if passive_income:
         summary["passive_income"] = {
             "annual_yield": passive_income["annual_income"],
             "monthly_income": passive_income["monthly_income"],
-            "account_count": len(passive_income["accounts"]),
             "accessible_balance": passive_income.get("accessible_balance", 0),
+            "accounts": [
+                {"name": a["account"], "type": a["type"],
+                 "balance": a["value"], "annual_yield": a["annual_yield"],
+                 "return_pct": round(a["annual_yield"] / a["value"] * 100, 2) if a["value"] else 0}
+                for a in passive_income["accounts"]
+            ],
             "rrsp_annual": passive_income.get("rrsp_annual", 0),
             "rrsp_monthly": passive_income.get("rrsp_monthly", 0),
             "rrsp_balance": passive_income.get("rrsp_balance", 0),
+            "rrsp_accounts": [
+                {"name": a["account"], "type": a["type"],
+                 "balance": a["value"], "annual_yield": a["annual_yield"],
+                 "return_pct": round(a["annual_yield"] / a["value"] * 100, 2) if a["value"] else 0}
+                for a in passive_income.get("rrsp_accounts", [])
+            ],
+            "net_worth": {
+                "accessible": passive_income.get("accessible_balance", 0),
+                "rrsp": passive_income.get("rrsp_balance", 0),
+                "corporate": passive_income.get("corporate_balance", 0),
+                "property": passive_income.get("property_balance", 0),
+                "resp": passive_income.get("resp_balance", 0),
+            },
         }
 
     # Corporate income
@@ -1303,7 +1375,7 @@ def get_ai_recommendations(data: dict, passive_income: dict | None = None,
 
     prompt = f"""Analyze this personal & corporate financial dashboard and provide actionable recommendations.
 
-Context: This dashboard covers a self-employed consultant pursuing financial sustainability, defined as: passive income >= burn rate. Income comes from three streams: (1) passive portfolio yield from personal investments — this is the SUSTAINABLE income, (2) corporate consulting revenue (Tall Tree Technology) at ~60% take-home after tax/expenses — this is ACTIVE income that bridges the gap, and (3) corporate dividend income (Britton Holdings). The "burn_rate_coverage" section shows how much of the burn rate is covered by passive income alone — coverage_pct is passive-only. Corporate income bridges the remaining gap but is not considered sustainable. "accessible_savings" is the total balance in Non-registered, Cash, and TFSA accounts that can be drawn without tax penalty; "runway_months" shows how long savings last if all income stopped (null if passive income already covers expenses). Revenue trend shows month-over-month changes in consulting income. "debts_paid_off" lists debts that were fully eliminated during this period — these are no longer owed and should be celebrated, not treated as outstanding obligations. The spending data includes fixed costs (tuition, car payment, utilities) and discretionary spending across credit and debit cards.
+Context: This dashboard covers a self-employed consultant pursuing financial sustainability, defined as: passive income >= burn rate. Income comes from three streams: (1) passive portfolio yield from personal investments — this is the SUSTAINABLE income, (2) corporate consulting revenue (Tall Tree Technology) at ~60% take-home after tax/expenses — this is ACTIVE income that bridges the gap, and (3) corporate dividend income (Britton Holdings). The "burn_rate_coverage" section shows how much of the burn rate is covered by passive income alone — coverage_pct is passive-only. Corporate income bridges the remaining gap but is not considered sustainable. "accessible_savings" is the total balance in Non-registered, Cash, and TFSA accounts that can be drawn without tax penalty; "runway_months" shows how long savings last if all income stopped (null if passive income already covers expenses). Revenue trend shows month-over-month changes in consulting income. "debts_paid_off" lists debts that were fully eliminated during this period — these are no longer owed and should be celebrated, not treated as outstanding obligations. The spending data includes fixed costs (tuition, car payment, utilities) and discretionary spending across credit and debit cards. The "passive_income.accounts" array contains per-account detail (name, type, balance, annual_yield, return_pct) for accessible accounts and RRSP accounts — use this to identify underperforming or overconcentrated positions. The "passive_income.net_worth" object shows the full balance breakdown across accessible, RRSP, corporate, property, and RESP holdings. Each category includes a "monthly" object with per-month spending for the last 6 months — use this to spot categories trending up or down.
 
 DATA:
 {json.dumps(summary, indent=2)}
@@ -1311,12 +1383,13 @@ DATA:
 Provide a MAXIMUM of 5 recommendations — no more than 5. Each should be specific, actionable, and reference actual numbers and merchant names from the data. Prioritize the most impactful insights from:
 - Sustainability gap (passive income vs burn rate — what would close the gap: higher yield, lower burn, or both)
 - Corporate bridge risk (revenue trend, client concentration — what happens if this bridge narrows)
-- Portfolio income observations (yield adequacy, RRSP vs accessible allocation, how to grow passive income)
+- Portfolio income observations (per-account yields, underperforming accounts, rebalancing opportunities, RRSP vs accessible allocation)
+- Net worth composition (concentration risk, liquidity, growth vs income allocation)
+- Category spending trends (categories trending up or down over recent months)
 - Corporate tax optimization (take-home rate, dividend timing, reinvesting to grow passive income)
 - Fixed cost optimization (insurance, utilities, recurring debits)
 - Subscription cost-saving actions (price increases to negotiate, services to cancel/downgrade)
 - Spending pattern optimizations (consolidation, alternatives)
-- Notable month-over-month changes worth investigating
 
 Format your response in clean HTML as a single <ol> list with at most 5 <li> items. Use <strong> for emphasis on merchant names and dollar amounts. Be concise — one short paragraph per recommendation."""
 
@@ -1889,47 +1962,97 @@ def generate_html(data: dict, ai_html: str | None = None,
     passive_section = ""
     if passive_income:
         # Accessible accounts table rows (sorted by yield desc, with heatmap)
+        acc_total_balance = passive_income["accessible_balance"]
+        acc_total_annual = passive_income["annual_income"]
+        acc_monthly = passive_income["monthly_income"]
+        acc_avg_return = (acc_total_annual / acc_total_balance * 100) if acc_total_balance else 0
+
+        # Sort accounts by yield gap (outperformers first)
+        acc_sorted = sorted(passive_income["accounts"],
+                            key=lambda a: a['annual_yield'] - a['value'] * acc_avg_return / 100,
+                            reverse=True)
+
         acc_rows = ""
-        acc_yields = [a['annual_yield'] for a in passive_income["accounts"]]
+        acc_gaps = []
+        acc_yields = [a['annual_yield'] for a in acc_sorted]
         acc_max_yield = max(acc_yields) if acc_yields else 1
-        for a in passive_income["accounts"]:
+        for a in acc_sorted:
             ret_pct = (a['annual_yield'] / a['value'] * 100) if a['value'] else 0
             intensity = a['annual_yield'] / acc_max_yield if acc_max_yield else 0
             heatmap_bg = f"rgba(39, 174, 96, {intensity * 0.35:.2f})"
+            expected_yield = a['value'] * acc_avg_return / 100
+            gap = a['annual_yield'] - expected_yield
+            acc_gaps.append(gap)
+            # Check if position is new (< 6 months old)
+            new_badge = ""
+            if a.get('start_date'):
+                age_days = (datetime.now().date() - a['start_date']).days
+                age_months = age_days // 30
+                if age_months < 6:
+                    label = f"{age_months} mo" if age_months > 0 else "< 1 mo"
+                    new_badge = f"<br><span style='font-size:0.8em;color:var(--muted)'>est. {label} ago — monitor</span>"
+            if gap >= 0:
+                gap_cell = f"<td style='text-align:right;color:#27ae60'>✅ +{money(abs(gap))}/yr</td>"
+            else:
+                gap_cell = f"<td style='text-align:right;color:#e67e22'>⚠️ −{money(abs(gap))}/yr{new_badge}</td>"
             acc_rows += (
                 f"<tr><td>{a['account']}</td><td>{a['type']}</td>"
                 f"<td style='text-align:right'>{money(a['value'])}</td>"
                 f"<td style='text-align:right'>{ret_pct:.1f}%</td>"
-                f"<td style='text-align:right;background:{heatmap_bg}'>{money(a['annual_yield'])}</td></tr>"
+                f"<td style='text-align:right;background:{heatmap_bg}'>{money(a['annual_yield'])}</td>"
+                f"{gap_cell}</tr>"
             )
-        acc_total_balance = passive_income["accessible_balance"]
-        acc_total_annual = passive_income["annual_income"]
-        acc_monthly = passive_income["monthly_income"]
+        acc_unrealized = sum(g for g in acc_gaps if g < 0)
 
         # RRSP accounts table (optional)
         rrsp_html = ""
         if passive_income.get("rrsp_accounts"):
+            rrsp_avg_return = (passive_income['rrsp_annual'] / passive_income['rrsp_balance'] * 100) if passive_income['rrsp_balance'] else 0
+            # Sort RRSP accounts by yield gap (outperformers first)
+            rrsp_sorted = sorted(passive_income["rrsp_accounts"],
+                                 key=lambda a: a['annual_yield'] - a['value'] * rrsp_avg_return / 100,
+                                 reverse=True)
             rrsp_rows = ""
-            rrsp_yields = [a['annual_yield'] for a in passive_income["rrsp_accounts"]]
+            rrsp_gaps = []
+            rrsp_yields = [a['annual_yield'] for a in rrsp_sorted]
             rrsp_max_yield = max(rrsp_yields) if rrsp_yields else 1
-            for a in passive_income["rrsp_accounts"]:
+            for a in rrsp_sorted:
                 ret_pct = (a['annual_yield'] / a['value'] * 100) if a['value'] else 0
                 intensity = a['annual_yield'] / rrsp_max_yield if rrsp_max_yield else 0
                 heatmap_bg = f"rgba(39, 174, 96, {intensity * 0.35:.2f})"
+                expected_yield = a['value'] * rrsp_avg_return / 100
+                gap = a['annual_yield'] - expected_yield
+                rrsp_gaps.append(gap)
+                # Check if position is new (< 6 months old)
+                new_badge = ""
+                if a.get('start_date'):
+                    age_days = (datetime.now().date() - a['start_date']).days
+                    age_months = age_days // 30
+                    if age_months < 6:
+                        label = f"{age_months} mo" if age_months > 0 else "< 1 mo"
+                        new_badge = f"<br><span style='font-size:0.8em;color:var(--muted)'>est. {label} ago — monitor</span>"
+                if gap >= 0:
+                    gap_cell = f"<td style='text-align:right;color:#27ae60'>✅ +{money(abs(gap))}/yr</td>"
+                else:
+                    gap_cell = f"<td style='text-align:right;color:#e67e22'>⚠️ −{money(abs(gap))}/yr{new_badge}</td>"
                 rrsp_rows += (
                     f"<tr><td>{a['account']}</td><td>{a['type']}</td>"
                     f"<td style='text-align:right'>{money(a['value'])}</td>"
                     f"<td style='text-align:right'>{ret_pct:.1f}%</td>"
-                    f"<td style='text-align:right;background:{heatmap_bg}'>{money(a['annual_yield'])}</td></tr>"
+                    f"<td style='text-align:right;background:{heatmap_bg}'>{money(a['annual_yield'])}</td>"
+                    f"{gap_cell}</tr>"
                 )
+            rrsp_unrealized = sum(g for g in rrsp_gaps if g < 0)
+            rrsp_unrealized_row = f'<tr style="color:#e67e22"><td colspan="5">Unrealized</td><td style="text-align:right">−{money(abs(rrsp_unrealized))}/yr (−{money(abs(rrsp_unrealized) / 12)}/mo)</td></tr>' if rrsp_unrealized < 0 else ""
             rrsp_html = f"""
     <h3 style="margin-top:30px">RRSP Accounts <span style="font-weight:400;color:var(--muted);font-size:0.85em">(tax-sheltered — not accessible without penalty)</span></h3>
-    <table class="data-table" style="max-width:700px">
-        <thead><tr><th>Account</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Annual Yield</th></tr></thead>
+    <table class="data-table" style="max-width:100%">
+        <thead><tr><th>Account</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Annual Yield</th><th style="text-align:right">vs Avg</th></tr></thead>
         <tbody>{rrsp_rows}</tbody>
         <tfoot>
-            <tr style="font-weight:700"><td colspan="2">Total RRSP</td><td style="text-align:right">{money(passive_income['rrsp_balance'])}</td><td style="text-align:right">{(passive_income['rrsp_annual'] / passive_income['rrsp_balance'] * 100) if passive_income['rrsp_balance'] else 0:.1f}%</td><td style="text-align:right">{money(passive_income['rrsp_annual'])}</td></tr>
-            <tr style="color:var(--muted)"><td colspan="4">Monthly Income</td><td style="text-align:right">{money(passive_income['rrsp_monthly'])}</td></tr>
+            <tr style="font-weight:700"><td colspan="2">Total RRSP</td><td style="text-align:right">{money(passive_income['rrsp_balance'])}</td><td style="text-align:right">{rrsp_avg_return:.1f}%</td><td style="text-align:right">{money(passive_income['rrsp_annual'])}</td><td></td></tr>
+            <tr style="color:var(--muted)"><td colspan="5">Monthly Income</td><td style="text-align:right">{money(passive_income['rrsp_monthly'])}</td></tr>
+            {rrsp_unrealized_row}
         </tfoot>
     </table>"""
 
@@ -1938,12 +2061,13 @@ def generate_html(data: dict, ai_html: str | None = None,
     <h2>Passive Income &amp; Accessible Savings</h2>
     <p style="color:var(--muted);margin-bottom:15px">Yield from personal investment accounts — accessible balance breakdown</p>
     <h3>Accessible Accounts</h3>
-    <table class="data-table" style="max-width:700px">
-        <thead><tr><th>Account</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Annual Yield</th></tr></thead>
+    <table class="data-table" style="max-width:100%">
+        <thead><tr><th>Account</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Annual Yield</th><th style="text-align:right">vs Avg</th></tr></thead>
         <tbody>{acc_rows}</tbody>
         <tfoot>
-            <tr style="font-weight:700"><td colspan="2">Total Accessible</td><td style="text-align:right">{money(acc_total_balance)}</td><td style="text-align:right">{(acc_total_annual / acc_total_balance * 100) if acc_total_balance else 0:.1f}%</td><td style="text-align:right">{money(acc_total_annual)}</td></tr>
-            <tr style="color:var(--muted)"><td colspan="4">Monthly Income</td><td style="text-align:right">{money(acc_monthly)}</td></tr>
+            <tr style="font-weight:700"><td colspan="2">Total Accessible</td><td style="text-align:right">{money(acc_total_balance)}</td><td style="text-align:right">{acc_avg_return:.1f}%</td><td style="text-align:right">{money(acc_total_annual)}</td><td></td></tr>
+            <tr style="color:var(--muted)"><td colspan="5">Monthly Income</td><td style="text-align:right">{money(acc_monthly)}</td></tr>
+            {'<tr style="color:#e67e22"><td colspan="5">Unrealized</td><td style="text-align:right">−' + money(abs(acc_unrealized)) + '/yr (−' + money(abs(acc_unrealized) / 12) + '/mo)</td></tr>' if acc_unrealized < 0 else ""}
         </tfoot>
     </table>
     {rrsp_html}
