@@ -1573,6 +1573,9 @@ def generate_html(data: dict, ai_html: str | None = None,
     milestones_tab_btn = ''
     if debt_payoffs:
         milestones_tab_btn = '<button data-tab="tab-milestones">Milestones</button>'
+    ai_tab_btn = ''
+    if ai_html:
+        ai_tab_btn = '<button data-tab="tab-ai">AI Recommendations</button>'
 
     # ── Chart.js for stacked monthly bar ──
     if has_debit:
@@ -1692,6 +1695,7 @@ canvas {{ max-width: 100%; }}
     {income_tab_btn}
     <button data-tab="tab-spending">Spending</button>
     {milestones_tab_btn}
+    {ai_tab_btn}
     <button data-tab="tab-deep-dives">Deep Dives</button>
 </div>
 
@@ -1752,9 +1756,11 @@ canvas {{ max-width: 100%; }}
 <!-- ═══ MILESTONES ═══ -->
 {'<div class="tab-panel" id="tab-milestones">' + debt_section + '</div>' if debt_payoffs else ''}
 
+<!-- ═══ AI RECOMMENDATIONS ═══ -->
+{'<div class="tab-panel" id="tab-ai">' + ai_section + '</div>' if ai_html else ''}
+
 <!-- ═══ DEEP DIVES ═══ -->
 <div class="tab-panel" id="tab-deep-dives">
-{ai_section}
 
 <section id="top-merchants" class="card">
     <h2>Top 20 Merchants</h2>
