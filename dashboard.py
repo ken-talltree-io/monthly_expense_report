@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Expense Dashboard & Subscription Auditor
-Reads credit card CSV exports and generates a self-contained HTML dashboard.
+Financial Dashboard & Subscription Auditor
+Reads credit card CSV exports and generates a self-contained HTML dashboard
+with personal & corporate financial overview.
 
 Usage:
     python3 dashboard.py                     # Basic dashboard
@@ -176,6 +177,8 @@ DEBT_PAYOFF_THRESHOLDS = {
     "Hyundai Car Payment": 5000,
 }
 
+CORPORATE_TAKE_HOME_RATE = 0.60  # Est. personal take-home after corp tax + personal tax on T4/T5
+
 
 def normalize_merchant(raw: str) -> str:
     upper = raw.upper().strip()
@@ -316,6 +319,39 @@ CATEGORY_RULES = [
     ]),
 ]
 
+# ── Category consolidation ───────────────────────────────────────────────────
+# Maps fine-grained categories to broader groups for cleaner reporting.
+# Any category not listed passes through unchanged.
+CATEGORY_CONSOLIDATION = {
+    "Education": "Kids & Education",
+    "Kids": "Kids & Education",
+    "Restaurants & Dining": "Food & Dining",
+    "Coffee Shops": "Food & Dining",
+    "Bakeries & Treats": "Food & Dining",
+    "Groceries": "Food & Dining",
+    "Liquor & Alcohol": "Food & Dining",
+    "Home Improvement": "Housing & Utilities",
+    "Housing": "Housing & Utilities",
+    "Utilities": "Housing & Utilities",
+    "Transportation": "Transportation",
+    "Auto": "Transportation",
+    "Parking & Gas": "Transportation",
+    "Health & Beauty": "Health & Wellness",
+    "Dental": "Health & Wellness",
+    "Medical": "Health & Wellness",
+    "Entertainment": "Recreation",
+    "Sports & Outdoor": "Recreation",
+    "Ski Resorts": "Recreation",
+    "Travel & Hotels": "Travel",
+    "Clothing": "Shopping",
+    "Amazon": "Shopping",
+    "Insurance": "Insurance",
+    "Streaming & Subscriptions": "Subscriptions & Telecom",
+    "Telecom": "Subscriptions & Telecom",
+    "Pets": "Pets",
+    "Donations": "Donations",
+}
+
 
 def load_user_categories(folder: str) -> dict:
     """Load merchant → category overrides from categories.csv if it exists."""
@@ -433,12 +469,14 @@ def parse_csvs(folder: str) -> list[dict]:
                     if merchant in BUSINESS_MERCHANTS:
                         business_total += amount
                         continue
+                    category = categorize(merchant)
+                    category = CATEGORY_CONSOLIDATION.get(category, category)
                     transactions.append({
                         "date": date,
                         "month": date.strftime("%Y-%m"),
                         "raw_merchant": raw_merchant,
                         "merchant": merchant,
-                        "category": categorize(merchant),
+                        "category": category,
                         "amount": amount,
                         "source": "credit",
                     })
@@ -457,12 +495,14 @@ def parse_csvs(folder: str) -> list[dict]:
                         if merchant in BUSINESS_MERCHANTS:
                             business_total += abs(amount)
                             continue
+                        category = categorize(merchant)
+                        category = CATEGORY_CONSOLIDATION.get(category, category)
                         transactions.append({
                             "date": date,
                             "month": date.strftime("%Y-%m"),
                             "raw_merchant": description,
                             "merchant": merchant,
-                            "category": categorize(merchant),
+                            "category": category,
                             "amount": abs(amount),
                             "source": "debit",
                         })
@@ -483,12 +523,14 @@ def parse_csvs(folder: str) -> list[dict]:
                                 "date": date,
                             })
                             continue
+                        category = categorize(merchant)
+                        category = CATEGORY_CONSOLIDATION.get(category, category)
                         transactions.append({
                             "date": date,
                             "month": date.strftime("%Y-%m"),
                             "raw_merchant": description,
                             "merchant": merchant,
-                            "category": categorize(merchant),
+                            "category": category,
                             "amount": amt,
                             "source": "debit",
                             "fixed_cost": True,
@@ -630,6 +672,77 @@ def extract_transfers(folder: str) -> dict:
             for m, v in transfers.items()}
 
 
+def extract_corporate_income(folder: str) -> dict | None:
+    """Extract corporate income from corporate account CSVs.
+
+    Reads CSVs from corporate/ subdirectory.
+    - Tall Tree Technology: CONT = client revenue (positive amounts)
+    - Britton Holdings (Growth): DIV = dividend income (positive amounts)
+    """
+    corp_dir = os.path.join(folder, "corporate")
+    if not os.path.isdir(corp_dir):
+        return None
+
+    csv_files = sorted(glob.glob(os.path.join(corp_dir, "*.csv")))
+    if not csv_files:
+        return None
+
+    revenue_monthly = defaultdict(float)
+    dividends_monthly = defaultdict(float)
+
+    for fpath in csv_files:
+        fname = os.path.basename(fpath)
+        is_tall_tree = "Tall Tree" in fname
+        is_bh = "Britton Holdings" in fname
+
+        if not is_tall_tree and not is_bh:
+            continue
+
+        with open(fpath, newline="", encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                txn_type = row.get("transaction", "").strip()
+                date_str = row.get("date", "").strip()
+                amount_str = row.get("amount", "").strip()
+
+                if not date_str or not amount_str:
+                    continue
+
+                try:
+                    amount = float(amount_str)
+                except (ValueError, TypeError):
+                    continue
+
+                if amount <= 0:
+                    continue
+
+                month = datetime.strptime(date_str, "%Y-%m-%d").strftime("%Y-%m")
+
+                if is_tall_tree and txn_type == "CONT":
+                    revenue_monthly[month] += amount
+                elif is_bh and txn_type == "DIV":
+                    dividends_monthly[month] += amount
+
+    if not revenue_monthly and not dividends_monthly:
+        return None
+
+    revenue_total = sum(revenue_monthly.values())
+    dividends_total = sum(dividends_monthly.values())
+    total_income = revenue_total + dividends_total
+
+    all_months = sorted(set(list(revenue_monthly.keys()) + list(dividends_monthly.keys())))
+    num_months = len(all_months)
+
+    return {
+        "revenue_monthly": {m: round(v, 2) for m, v in sorted(revenue_monthly.items())},
+        "dividends_monthly": {m: round(v, 2) for m, v in sorted(dividends_monthly.items())},
+        "revenue_total": round(revenue_total, 2),
+        "dividends_total": round(dividends_total, 2),
+        "total_income": round(total_income, 2),
+        "monthly_avg": round(total_income / num_months, 2) if num_months else 0,
+        "months": num_months,
+    }
+
+
 # ── Analysis ─────────────────────────────────────────────────────────────────
 
 def analyze(transactions: list[dict], transfers: dict | None = None,
@@ -657,11 +770,16 @@ def analyze(transactions: list[dict], transfers: dict | None = None,
         merchant_monthly[t["merchant"]][t["month"]] += t["amount"]
         monthly_txns[t["month"]].append(t)
 
-    # Month-over-month trend
+    # 3-month trend: avg of last 3 months vs avg of previous 3 months
     monthly_list = [(m, monthly_totals[m]) for m in months_set]
-    if len(monthly_list) >= 2:
-        last, prev = monthly_list[-1][1], monthly_list[-2][1]
-        mom_change = ((last - prev) / prev) * 100 if prev else 0
+    if len(monthly_list) >= 6:
+        recent_avg = sum(v for _, v in monthly_list[-3:]) / 3
+        prior_avg = sum(v for _, v in monthly_list[-6:-3]) / 3
+        mom_change = ((recent_avg - prior_avg) / prior_avg) * 100 if prior_avg else 0
+    elif len(monthly_list) >= 2:
+        recent_avg = sum(v for _, v in monthly_list[-3:]) / len(monthly_list[-3:])
+        prior_avg = sum(v for _, v in monthly_list[:-3]) / len(monthly_list[:-3]) if len(monthly_list) > 3 else monthly_list[0][1]
+        mom_change = ((recent_avg - prior_avg) / prior_avg) * 100 if prior_avg else 0
     else:
         mom_change = 0
 
@@ -675,11 +793,9 @@ def analyze(transactions: list[dict], transfers: dict | None = None,
 
     # Categories that are NOT subscription-like (regular shopping/dining)
     NON_SUB_CATEGORIES = {
-        "Restaurants & Dining", "Coffee Shops", "Bakeries & Treats",
-        "Groceries", "Liquor & Alcohol", "Clothing", "Sports & Outdoor",
-        "Entertainment", "Amazon", "Home Improvement", "Parking & Gas",
-        "Kids", "Travel & Hotels", "Donations", "Ski Resorts",
-        "Education", "Utilities", "Medical", "Housing",
+        "Food & Dining", "Shopping", "Recreation",
+        "Housing & Utilities", "Transportation", "Travel",
+        "Kids & Education", "Donations",
     }
 
     # Known service/subscription merchant keywords (always consider these)
@@ -919,7 +1035,8 @@ Format your response in clean HTML as a single <ol> list with 10 <li> items. Use
 
 def generate_html(data: dict, ai_html: str | None = None,
                    notes: dict | None = None, budgets: dict | None = None,
-                   passive_income: dict | None = None) -> str:
+                   passive_income: dict | None = None,
+                   corporate_income: dict | None = None) -> str:
     notes = notes or {}
     budgets = budgets or {}
     months = data["months"]
@@ -1112,14 +1229,37 @@ def generate_html(data: dict, ai_html: str | None = None,
             <div class="ai-recommendations">{ai_html}</div>
         </section>"""
 
-    # ── Passive income vs burn rate (the main story) ──
+    # ── Income vs burn rate (the main story) ──
     monthly_passive = passive_income["monthly_income"] if passive_income else 0
     annual_passive = passive_income["annual_income"] if passive_income else 0
     rrsp_monthly = passive_income["rrsp_monthly"] if passive_income else 0
     rrsp_annual = passive_income["rrsp_annual"] if passive_income else 0
-    if passive_income and burn_rate > 0:
-        coverage_pct = monthly_passive / burn_rate * 100
-        gap = monthly_passive - burn_rate
+
+    # Corporate income components — trailing 3-month average (same window as burn rate)
+    if corporate_income:
+        corp_months_all = sorted(set(
+            list(corporate_income["revenue_monthly"].keys()) +
+            list(corporate_income["dividends_monthly"].keys())
+        ))
+        corp_trailing = corp_months_all[-3:]  # last 3 months
+        corp_trailing_n = len(corp_trailing)
+        corp_revenue_avg = round(sum(corporate_income["revenue_monthly"].get(m, 0) for m in corp_trailing) / corp_trailing_n, 2) if corp_trailing_n else 0
+        corp_div_avg = round(sum(corporate_income["dividends_monthly"].get(m, 0) for m in corp_trailing) / corp_trailing_n, 2) if corp_trailing_n else 0
+    else:
+        corp_months_all = []
+        corp_trailing = []
+        corp_trailing_n = 0
+        corp_revenue_avg = 0
+        corp_div_avg = 0
+
+    corp_revenue_takehome = round(corp_revenue_avg * CORPORATE_TAKE_HOME_RATE, 2)
+    corp_monthly_takehome = corp_revenue_takehome + corp_div_avg
+    combined_monthly = monthly_passive + corp_monthly_takehome
+    has_income = passive_income or corporate_income
+
+    if has_income and burn_rate > 0:
+        coverage_pct = combined_monthly / burn_rate * 100
+        gap = combined_monthly - burn_rate
         if coverage_pct >= 100:
             coverage_color = "#27ae60"
             coverage_label = f"Surplus: {money(gap)}/mo"
@@ -1134,20 +1274,32 @@ def generate_html(data: dict, ai_html: str | None = None,
         coverage_color = "#95a5a6"
         coverage_label = ""
 
-    # Hero card: passive income vs burn rate
+    # Hero card: income vs burn rate
     hero_card = ""
-    if passive_income:
+    if has_income:
         bar_fill = min(coverage_pct, 100)
+        # Income breakdown lines
+        income_breakdown = ""
+        if monthly_passive > 0:
+            income_breakdown += f'<div style="font-size:0.82em;color:var(--muted);margin-top:4px">Personal passive: {money(monthly_passive)}/mo <span style="color:#76b7b2">({money(annual_passive)}/yr)</span></div>'
+            income_breakdown += '<div style="font-size:0.75em;color:var(--muted);font-style:italic;margin-top:1px;margin-left:4px">projected portfolio yield</div>'
+        if corp_revenue_avg > 0:
+            income_breakdown += f'<div style="font-size:0.82em;color:var(--muted);margin-top:2px">Corporate revenue: {money(corp_revenue_avg)}/mo gross → {money(corp_revenue_takehome)}/mo est. take-home ({int(CORPORATE_TAKE_HOME_RATE*100)}%) <span style="color:#f28e2b">(Tall Tree)</span></div>'
+        if corp_div_avg > 0:
+            income_breakdown += f'<div style="font-size:0.82em;color:var(--muted);margin-top:2px">Corporate dividends: {money(corp_div_avg)}/mo <span style="color:#b07aa1">(Britton Holdings)</span></div>'
+        if corp_revenue_avg > 0 or corp_div_avg > 0:
+            income_breakdown += f'<div style="font-size:0.75em;color:var(--muted);font-style:italic;margin-top:1px;margin-left:4px">3-month trailing avg ({int(CORPORATE_TAKE_HOME_RATE*100)}% take-home on revenue)</div>'
         rrsp_note = ""
         if rrsp_annual > 0:
             rrsp_note = f'<div style="font-size:0.82em;color:var(--muted);margin-top:6px">+ {money(rrsp_monthly)}/mo growing in RRSPs <span style="color:#b07aa1">({money(rrsp_annual)}/yr)</span></div>'
+        income_label = "Combined Income" if (monthly_passive > 0 and corp_monthly_takehome > 0) else "Accessible Investment Income" if monthly_passive > 0 else "Corporate Income"
         hero_card = f"""
     <div class="card" style="margin-bottom:20px">
         <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:20px">
             <div style="flex:1;min-width:200px">
-                <div style="font-size:0.85em;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Accessible Investment Income</div>
-                <div style="font-size:2.2em;font-weight:700;color:#27ae60">{money(monthly_passive)}<span style="font-size:0.4em;font-weight:400;color:var(--muted)">/mo</span></div>
-                <div style="font-size:0.85em;color:var(--muted)">{money(annual_passive)}/year from Non-reg, TFSA &amp; Cash</div>
+                <div style="font-size:0.85em;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">{income_label}</div>
+                <div style="font-size:2.2em;font-weight:700;color:#27ae60">{money(combined_monthly)}<span style="font-size:0.4em;font-weight:400;color:var(--muted)">/mo</span></div>
+                {income_breakdown}
                 {rrsp_note}
             </div>
             <div style="flex:0 0 60px;text-align:center">
@@ -1174,7 +1326,7 @@ def generate_html(data: dict, ai_html: str | None = None,
     overview_stats = f"""
     <div class="stat"><div class="value">{money(data['total'])}</div><div class="label">Total Spend ({len(months)} months)</div></div>
     <div class="stat"><div class="value">{money(data['monthly_avg'])}</div><div class="label">Monthly Average</div></div>
-    <div class="stat"><div class="value" style="color:{trend_color}">{trend_arrow} {abs(data['mom_change'])}%</div><div class="label">Month-over-Month</div></div>"""
+    <div class="stat"><div class="value" style="color:{trend_color}">{trend_arrow} {abs(data['mom_change']):.0f}%</div><div class="label">3-Month Trend</div></div>"""
     if debt_payoff_total > 0:
         overview_stats += f"""
     <div class="stat"><div class="value" style="color:#27ae60">{money(debt_payoff_total)}</div><div class="label">Debt Paid Off</div></div>"""
@@ -1230,8 +1382,50 @@ def generate_html(data: dict, ai_html: str | None = None,
     </div>
 </section>"""
 
+    # ── Corporate Income section ──
+    corporate_section = ""
+    if corporate_income:
+        corp_months_sorted = sorted(set(
+            list(corporate_income["revenue_monthly"].keys()) +
+            list(corporate_income["dividends_monthly"].keys())
+        ))
+        corp_rows = ""
+        for m in corp_months_sorted:
+            m_label = datetime.strptime(m, "%Y-%m").strftime("%b %Y")
+            rev = corporate_income["revenue_monthly"].get(m, 0)
+            div = corporate_income["dividends_monthly"].get(m, 0)
+            m_total = rev + div
+            rev_cell = money(rev) if rev > 0 else '<span style="color:#ccc">\u2014</span>'
+            div_cell = money(div) if div > 0 else '<span style="color:#ccc">\u2014</span>'
+            corp_rows += f"<tr><td>{m_label}</td><td style='text-align:right'>{rev_cell}</td><td style='text-align:right'>{div_cell}</td><td style='text-align:right;font-weight:600'>{money(m_total)}</td></tr>"
+        # Revenue trend warning: detect if latest month < 80% of prior month
+        corp_revenue_warning = ""
+        if len(corp_months_sorted) >= 2:
+            latest_rev = corporate_income["revenue_monthly"].get(corp_months_sorted[-1], 0)
+            prior_rev = corporate_income["revenue_monthly"].get(corp_months_sorted[-2], 0)
+            if prior_rev > 0 and latest_rev < prior_rev * 0.80:
+                decline_pct = round((1 - latest_rev / prior_rev) * 100)
+                corp_revenue_warning = f'<div style="color:#e74c3c;font-size:0.9em;margin-top:10px;font-weight:600">⚠ Revenue declining: down {decline_pct}% month-over-month</div>'
+        corp_trailing_total_avg = round(corp_revenue_avg + corp_div_avg, 2)
+        corporate_section = f"""
+<section id="corporate-income" class="card">
+    <h2>Corporate Income</h2>
+    <p style="color:var(--muted);margin-bottom:15px">Revenue from Tall Tree Technology (client payments) and dividends from Britton Holdings Growth (investment portfolio)</p>
+    {corp_revenue_warning}
+    <table class="data-table" style="max-width:600px">
+        <thead><tr><th>Month</th><th style="text-align:right">Revenue (Tall Tree)</th><th style="text-align:right">Dividends (BH Growth)</th><th style="text-align:right">Total</th></tr></thead>
+        <tbody>{corp_rows}</tbody>
+        <tfoot>
+            <tr style="font-weight:700"><td>Total</td><td style="text-align:right">{money(corporate_income['revenue_total'])}</td><td style="text-align:right">{money(corporate_income['dividends_total'])}</td><td style="text-align:right">{money(corporate_income['total_income'])}</td></tr>
+            <tr style="color:var(--muted)"><td>Trailing Avg (3-mo)</td><td style="text-align:right">{money(corp_revenue_avg)}</td><td style="text-align:right">{money(corp_div_avg)}</td><td style="text-align:right">{money(corp_trailing_total_avg)}</td></tr>
+        </tfoot>
+    </table>
+</section>"""
+
     # ── TOC links ──
     toc_items = '<li><a href="#overview">Overview</a></li>'
+    if corporate_income:
+        toc_items += '\n    <li><a href="#corporate-income">Corporate Income</a></li>'
     if debt_payoffs:
         toc_items += '\n    <li><a href="#debt-freedom">Debt Freedom</a></li>'
     toc_items += '\n    <li><a href="#charts">Charts</a></li>'
@@ -1306,7 +1500,7 @@ def generate_html(data: dict, ai_html: str | None = None,
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Expense Dashboard — {months[0]} to {months[-1]}</title>
+<title>Financial Dashboard — {months[0]} to {months[-1]}</title>
 <style>
 :root {{
     --bg: #f5f6fa;
@@ -1350,8 +1544,8 @@ nav.toc a:hover {{ background: var(--accent); color: #fff; }}
 </style>
 </head>
 <body>
-<h1>Expense Dashboard</h1>
-<p class="subtitle">Household spending analysis: {month_labels[0]} – {month_labels[-1]} | Generated {datetime.now().strftime('%b %d, %Y at %I:%M %p')}</p>
+<h1>Financial Dashboard</h1>
+<p class="subtitle">Personal &amp; corporate financial overview: {month_labels[0]} – {month_labels[-1]} | Generated {datetime.now().strftime('%b %d, %Y at %I:%M %p')}</p>
 
 <nav class="toc"><ul>
     {toc_items}
@@ -1363,6 +1557,8 @@ nav.toc a:hover {{ background: var(--accent); color: #fff; }}
 <div class="stats">
     {overview_stats}
 </div>
+
+{corporate_section}
 
 {debt_section}
 
@@ -1453,7 +1649,7 @@ document.addEventListener('DOMContentLoaded', function() {{
 </script>
 
 <footer style="text-align:center;padding:30px;color:var(--muted);font-size:0.85em">
-    Generated by Expense Dashboard &amp; Subscription Auditor
+    Generated by Financial Dashboard &amp; Subscription Auditor
 </footer>
 </body>
 </html>"""
@@ -1463,7 +1659,7 @@ document.addEventListener('DOMContentLoaded', function() {{
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Expense Dashboard & Subscription Auditor")
+    parser = argparse.ArgumentParser(description="Financial Dashboard & Subscription Auditor")
     parser.add_argument("--path", default=".", help="Folder containing CSV files (default: current directory)")
     parser.add_argument("--ai", action="store_true", help="Generate AI-powered recommendations (requires ANTHROPIC_API_KEY)")
     args = parser.parse_args()
@@ -1492,6 +1688,11 @@ def main():
     if passive_income:
         print(f"Portfolio passive income: ${passive_income['annual_income']:,.2f}/year (${passive_income['monthly_income']:,.2f}/month) from {len(passive_income['accounts'])} accounts")
 
+    # Extract corporate income from corporate accounts
+    corporate_income = extract_corporate_income(folder)
+    if corporate_income:
+        print(f"Corporate income: ${corporate_income['total_income']:,.2f} total ({corporate_income['months']} months) — Revenue: ${corporate_income['revenue_total']:,.2f}, Dividends: ${corporate_income['dividends_total']:,.2f}")
+
     data = analyze(transactions, transfers=transfers,
                    debt_payoffs=debt_payoffs)
     print(f"Total spend: ${data['total']:,.2f} across {len(data['months'])} months")
@@ -1504,7 +1705,8 @@ def main():
         ai_html = get_ai_recommendations(data)
 
     html = generate_html(data, ai_html, notes=user_notes, budgets=user_budgets,
-                         passive_income=passive_income)
+                         passive_income=passive_income,
+                         corporate_income=corporate_income)
     output_path = os.path.join(folder, "dashboard.html")
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html)
