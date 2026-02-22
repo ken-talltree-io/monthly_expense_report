@@ -505,35 +505,98 @@ def parse_csvs(folder: str) -> list[dict]:
 
 # ── Income & Transfer Extraction ─────────────────────────────────────────────
 
-def extract_income(folder: str) -> dict:
-    """Extract monthly income totals from debit card CSVs.
+def extract_passive_income(folder: str) -> dict | None:
+    """Extract annual passive income from investment portfolio CSV.
 
-    Includes: EFT deposits matching $25K pattern, AFT_IN from Brock Health.
-    Excludes: Steadyhand redemptions, large one-time transfers, inheritance.
+    Reads investments/*.csv and sums yield (annual income) for personal accounts.
+    Excludes Corporate, RESP, and Property accounts.
+    For accounts with TBD yield, estimates from return rate * total value.
     """
-    income = defaultdict(float)
-    debit_dir = os.path.join(folder, "debit card")
-    if not os.path.isdir(debit_dir):
-        return {}
+    invest_dir = os.path.join(folder, "investments")
+    if not os.path.isdir(invest_dir):
+        return None
 
-    for fpath in sorted(glob.glob(os.path.join(debit_dir, "*.csv"))):
+    csv_files = sorted(glob.glob(os.path.join(invest_dir, "*.csv")))
+    if not csv_files:
+        return None
+
+    EXCLUDE_TYPES = {"Corporate", "Property", "RESP"}
+    ACCESSIBLE_TYPES = {"Non-reg", "Cash", "TFSA"}  # spendable without tax penalty
+
+    accessible = []
+    rrsp = []
+
+    for fpath in csv_files:
         with open(fpath, newline="", encoding="utf-8-sig") as f:
-            for row in csv.DictReader(f):
-                txn_type = row["transaction"]
-                amount = float(row["amount"])
-                description = row.get("description", "")
-                date = datetime.strptime(row["date"], "%Y-%m-%d")
-                month = date.strftime("%Y-%m")
+            reader = csv.reader(f)
+            next(reader)  # skip header row
 
-                # Regular $25K EFT deposits (salary/income pattern)
-                if txn_type == "EFT" and amount == 25000.0:
-                    income[month] += amount
+            for row in reader:
+                if len(row) < 10:
+                    continue
 
-                # Brock Health direct deposits (employment income)
-                if txn_type == "AFT_IN" and "BROCK HEALTH" in description.upper():
-                    income[month] += amount
+                account = row[0].strip().replace("\n", " ")
+                asset_type = row[2].strip().replace("\n", " ")
 
-    return dict(income)
+                # Skip excluded types and totals row
+                if asset_type in EXCLUDE_TYPES or not account:
+                    continue
+
+                # Parse total value
+                val_str = row[4].strip().replace("$", "").replace(",", "")
+                try:
+                    total_value = float(val_str)
+                except (ValueError, TypeError):
+                    continue
+                if total_value <= 0:
+                    continue
+
+                # Parse yield — either explicit dollar amount or TBD
+                yield_str = row[9].strip()
+                if yield_str.upper() == "TBD" or not yield_str:
+                    # Estimate from return rate * total value
+                    rate_str = row[8].strip().replace("%", "")
+                    try:
+                        rate = float(rate_str) / 100
+                        annual_yield = total_value * rate
+                    except (ValueError, TypeError):
+                        annual_yield = 0.0
+                else:
+                    cleaned = yield_str.replace("$", "").replace(",", "")
+                    try:
+                        annual_yield = float(cleaned)
+                    except (ValueError, TypeError):
+                        annual_yield = 0.0
+
+                if annual_yield <= 0:
+                    continue
+
+                entry = {
+                    "account": account,
+                    "type": asset_type,
+                    "value": total_value,
+                    "annual_yield": round(annual_yield, 2),
+                }
+
+                if asset_type in ACCESSIBLE_TYPES:
+                    accessible.append(entry)
+                elif asset_type == "RRSP":
+                    rrsp.append(entry)
+
+    if not accessible and not rrsp:
+        return None
+
+    accessible_yield = sum(a["annual_yield"] for a in accessible)
+    rrsp_yield = sum(a["annual_yield"] for a in rrsp)
+
+    return {
+        "annual_income": round(accessible_yield, 2),
+        "monthly_income": round(accessible_yield / 12, 2),
+        "accounts": sorted(accessible, key=lambda a: a["annual_yield"], reverse=True),
+        "rrsp_annual": round(rrsp_yield, 2),
+        "rrsp_monthly": round(rrsp_yield / 12, 2),
+        "rrsp_accounts": sorted(rrsp, key=lambda a: a["annual_yield"], reverse=True),
+    }
 
 
 def extract_transfers(folder: str) -> dict:
@@ -569,10 +632,8 @@ def extract_transfers(folder: str) -> dict:
 
 # ── Analysis ─────────────────────────────────────────────────────────────────
 
-def analyze(transactions: list[dict], income: dict | None = None,
-            transfers: dict | None = None,
+def analyze(transactions: list[dict], transfers: dict | None = None,
             debt_payoffs: list | None = None) -> dict:
-    income = income or {}
     transfers = transfers or {}
     debt_payoffs = debt_payoffs or []
     months_set = sorted({t["month"] for t in transactions})
@@ -748,14 +809,6 @@ def analyze(transactions: list[dict], income: dict | None = None,
         key=lambda x: x[1], reverse=True
     )
 
-    # Savings rate per month
-    savings_rate = {}
-    for m in months_set:
-        inc = income.get(m, 0)
-        spend = monthly_totals.get(m, 0)
-        if inc > 0:
-            savings_rate[m] = round(((inc - spend) / inc) * 100, 1)
-
     return {
         "months": months_set,
         "total": round(total, 2),
@@ -767,9 +820,7 @@ def analyze(transactions: list[dict], income: dict | None = None,
         "subscriptions": subscriptions,
         "top_merchants": top_merchants,
         "monthly_txns": {m: sorted(monthly_txns[m], key=lambda t: t["date"]) for m in months_set},
-        "income": income,
         "transfers": transfers,
-        "savings_rate": savings_rate,
         "fixed_costs": {m: round(sum(v.get(m, 0) for v in fixed_merchants.values()), 2) for m in months_set},
         "fixed_cost_detail": fixed_cost_detail,
         "fixed_total": round(fixed_total, 2),
@@ -809,8 +860,6 @@ def get_ai_recommendations(data: dict) -> str | None:
             {"name": m, "total": t, "txn_count": c}
             for m, t, c in data["top_merchants"]
         ],
-        "income": data.get("income", {}),
-        "savings_rate": data.get("savings_rate", {}),
         "fixed_costs": [
             {"merchant": m, "total": t} for m, t, _ in data.get("fixed_cost_detail", [])
         ],
@@ -869,7 +918,8 @@ Format your response in clean HTML as a single <ol> list with 10 <li> items. Use
 # ── HTML Generation ──────────────────────────────────────────────────────────
 
 def generate_html(data: dict, ai_html: str | None = None,
-                   notes: dict | None = None, budgets: dict | None = None) -> str:
+                   notes: dict | None = None, budgets: dict | None = None,
+                   passive_income: dict | None = None) -> str:
     notes = notes or {}
     budgets = budgets or {}
     months = data["months"]
@@ -944,16 +994,6 @@ def generate_html(data: dict, ai_html: str | None = None,
     debit_monthly = json.dumps([source_breakdown.get("debit", {}).get(m, 0) for m in months])
     has_debit = "debit" in source_breakdown
 
-    # Income & savings data
-    income_data = data.get("income", {})
-    savings_rate = data.get("savings_rate", {})
-    has_income = bool(income_data)
-    total_income = sum(income_data.values())
-    num_income_months = sum(1 for m in months if income_data.get(m, 0) > 0)
-    avg_income = total_income / num_income_months if num_income_months else 0
-    rates_with_income = [savings_rate[m] for m in months if m in savings_rate]
-    avg_savings_rate = round(sum(rates_with_income) / len(rates_with_income), 1) if rates_with_income else 0
-
     # Fixed costs data
     fixed_detail = data.get("fixed_cost_detail", [])
     fixed_total = data.get("fixed_total", 0)
@@ -973,6 +1013,19 @@ def generate_html(data: dict, ai_html: str | None = None,
     annual_interest_saved = sum(
         d["amount"] * INTEREST_RATES.get(d["merchant"], 0) for d in debt_payoffs
     )
+
+    # Burn rate — recent 3-month average, excluding paid-off debt payments
+    debt_merchants = set(DEBT_PAYOFF_THRESHOLDS.keys()) if debt_payoffs else set()
+    recent_months = months[-3:]
+    recent_adjusted = []
+    for m in recent_months:
+        m_total = data["monthly_totals"].get(m, 0)
+        if debt_merchants:
+            debt_in_month = sum(t["amount"] for t in data["monthly_txns"].get(m, [])
+                                if t["merchant"] in debt_merchants)
+            m_total -= debt_in_month
+        recent_adjusted.append(m_total)
+    burn_rate = sum(recent_adjusted) / len(recent_adjusted) if recent_adjusted else 0
 
     # ── Build table rows ──
 
@@ -1059,18 +1112,69 @@ def generate_html(data: dict, ai_html: str | None = None,
             <div class="ai-recommendations">{ai_html}</div>
         </section>"""
 
+    # ── Passive income vs burn rate (the main story) ──
+    monthly_passive = passive_income["monthly_income"] if passive_income else 0
+    annual_passive = passive_income["annual_income"] if passive_income else 0
+    rrsp_monthly = passive_income["rrsp_monthly"] if passive_income else 0
+    rrsp_annual = passive_income["rrsp_annual"] if passive_income else 0
+    if passive_income and burn_rate > 0:
+        coverage_pct = monthly_passive / burn_rate * 100
+        gap = monthly_passive - burn_rate
+        if coverage_pct >= 100:
+            coverage_color = "#27ae60"
+            coverage_label = f"Surplus: {money(gap)}/mo"
+        elif coverage_pct >= 75:
+            coverage_color = "#f39c12"
+            coverage_label = f"Gap: {money(abs(gap))}/mo"
+        else:
+            coverage_color = "#e74c3c"
+            coverage_label = f"Gap: {money(abs(gap))}/mo"
+    else:
+        coverage_pct = 0
+        coverage_color = "#95a5a6"
+        coverage_label = ""
+
+    # Hero card: passive income vs burn rate
+    hero_card = ""
+    if passive_income:
+        bar_fill = min(coverage_pct, 100)
+        rrsp_note = ""
+        if rrsp_annual > 0:
+            rrsp_note = f'<div style="font-size:0.82em;color:var(--muted);margin-top:6px">+ {money(rrsp_monthly)}/mo growing in RRSPs <span style="color:#b07aa1">({money(rrsp_annual)}/yr)</span></div>'
+        hero_card = f"""
+    <div class="card" style="margin-bottom:20px">
+        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:20px">
+            <div style="flex:1;min-width:200px">
+                <div style="font-size:0.85em;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Accessible Investment Income</div>
+                <div style="font-size:2.2em;font-weight:700;color:#27ae60">{money(monthly_passive)}<span style="font-size:0.4em;font-weight:400;color:var(--muted)">/mo</span></div>
+                <div style="font-size:0.85em;color:var(--muted)">{money(annual_passive)}/year from Non-reg, TFSA &amp; Cash</div>
+                {rrsp_note}
+            </div>
+            <div style="flex:0 0 60px;text-align:center">
+                <div style="font-size:1.8em;color:var(--muted)">vs</div>
+            </div>
+            <div style="flex:1;min-width:200px;text-align:right">
+                <div style="font-size:0.85em;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Burn Rate</div>
+                <div style="font-size:2.2em;font-weight:700;color:#e15759">{money(burn_rate)}<span style="font-size:0.4em;font-weight:400;color:var(--muted)">/mo</span></div>
+                <div style="font-size:0.85em;color:var(--muted)">3-month trailing average</div>
+            </div>
+        </div>
+        <div style="margin-top:20px">
+            <div style="display:flex;justify-content:space-between;margin-bottom:6px">
+                <span style="font-size:0.85em;font-weight:600;color:{coverage_color}">Coverage: {coverage_pct:.0f}%</span>
+                <span style="font-size:0.85em;color:{coverage_color}">{coverage_label}</span>
+            </div>
+            <div style="background:#eee;border-radius:6px;height:12px;overflow:hidden">
+                <div style="width:{bar_fill:.0f}%;background:{coverage_color};height:100%;border-radius:6px;transition:width 0.3s"></div>
+            </div>
+        </div>
+    </div>"""
+
     # ── Overview stats ──
     overview_stats = f"""
-    <div class="stat"><div class="value">{money(data['total'])}</div><div class="label">Total Spend</div></div>
-    <div class="stat"><div class="value">{money(data['monthly_avg'])}</div><div class="label">Monthly Average</div></div>"""
-    if has_income:
-        overview_stats += f"""
-    <div class="stat"><div class="value" style="color:#27ae60">{money(avg_income)}</div><div class="label">Avg Monthly Income</div></div>
-    <div class="stat"><div class="value" style="color:{'#27ae60' if avg_savings_rate > 0 else '#e74c3c'}">{avg_savings_rate}%</div><div class="label">Avg Savings Rate</div></div>"""
-    else:
-        overview_stats += f"""
-    <div class="stat"><div class="value" style="color:{trend_color}">{trend_arrow} {abs(data['mom_change'])}%</div><div class="label">Month-over-Month</div></div>
-    <div class="stat"><div class="value">{len(data['subscriptions'])}</div><div class="label">Recurring Charges</div></div>"""
+    <div class="stat"><div class="value">{money(data['total'])}</div><div class="label">Total Spend ({len(months)} months)</div></div>
+    <div class="stat"><div class="value">{money(data['monthly_avg'])}</div><div class="label">Monthly Average</div></div>
+    <div class="stat"><div class="value" style="color:{trend_color}">{trend_arrow} {abs(data['mom_change'])}%</div><div class="label">Month-over-Month</div></div>"""
     if debt_payoff_total > 0:
         overview_stats += f"""
     <div class="stat"><div class="value" style="color:#27ae60">{money(debt_payoff_total)}</div><div class="label">Debt Paid Off</div></div>"""
@@ -1253,8 +1357,9 @@ nav.toc a:hover {{ background: var(--accent); color: #fff; }}
     {toc_items}
 </ul></nav>
 
-<!-- Overview Stats -->
+<!-- Overview -->
 <div id="overview"></div>
+{hero_card}
 <div class="stats">
     {overview_stats}
 </div>
@@ -1377,16 +1482,17 @@ def main():
     transactions, debt_payoffs = parse_csvs(folder)
     print(f"Loaded {len(transactions)} transactions")
 
-    # Extract income and transfer data from debit card CSVs
-    income = extract_income(folder)
+    # Extract transfer data from debit card CSVs
     transfers = extract_transfers(folder)
-    if income:
-        total_inc = sum(income.values())
-        print(f"Found income data: ${total_inc:,.2f} across {len(income)} months")
     if transfers:
         print(f"Found transfer data across {len(transfers)} months")
 
-    data = analyze(transactions, income=income, transfers=transfers,
+    # Extract passive income from investment portfolio
+    passive_income = extract_passive_income(folder)
+    if passive_income:
+        print(f"Portfolio passive income: ${passive_income['annual_income']:,.2f}/year (${passive_income['monthly_income']:,.2f}/month) from {len(passive_income['accounts'])} accounts")
+
+    data = analyze(transactions, transfers=transfers,
                    debt_payoffs=debt_payoffs)
     print(f"Total spend: ${data['total']:,.2f} across {len(data['months'])} months")
     print(f"Found {len(data['subscriptions'])} recurring charges")
@@ -1397,7 +1503,8 @@ def main():
     if args.ai:
         ai_html = get_ai_recommendations(data)
 
-    html = generate_html(data, ai_html, notes=user_notes, budgets=user_budgets)
+    html = generate_html(data, ai_html, notes=user_notes, budgets=user_budgets,
+                         passive_income=passive_income)
     output_path = os.path.join(folder, "dashboard.html")
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html)
