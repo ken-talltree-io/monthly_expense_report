@@ -156,6 +156,26 @@ MERCHANT_ALIASES = {
     "DECATHLON": "Decathlon",
     "CAPRI VALLEY": "Capri Valley Lanes",
     "OTTER CO-OP": "Otter Co-op",
+    # ScotiaBank merchants
+    "RBCINS-LIFE": "RBC Life Insurance",
+    "SUNLIFE MED INS": "Sun Life Insurance",
+    "HYUNDAI CAPITAL": "Hyundai Car Payment",
+    "COSTCO WHOLESALE": "Costco",
+    "COSTCOWHOLESALE": "Costco",
+    "FPOS COSTCO": "Costco",
+    "STEADYHAND": "Steadyhand Investments",
+    "REALCDNSUPERSTORE": "Real Canadian Superstore",
+    "REALCDNLIQUORSTORE": "Real Canadian Liquor Store",
+    "SPAUTOPIA": "Spautopia Spa",
+    "B.C.HYDRO&POWER": "BC Hydro",
+    "B.C. HYDRO-PAP": "BC Hydro",
+    "BC HYDRO EV": "BC Hydro",
+    "FORTISBCHOLDINGSINC": "FortisBC",
+    "FORTISBC ENERGY": "FortisBC",
+    "HYUNDAICAPITAL-RETAILCOLL": "Hyundai Car Payment",
+    "STRATFORDHALL-BLACKBAUD": "Stratford Hall (Tuition)",
+    "HKRETAILFUNDINGLP": "Hyundai Car Payment",
+    "SCOTIABANK INSURANCE": "Scotiabank Insurance",
     # Debit card merchants
     "STRATFORD HALL": "Stratford Hall (Tuition)",
     "HYUNDAI PMNT": "Hyundai Car Payment",
@@ -165,10 +185,102 @@ MERCHANT_ALIASES = {
     "ZENSURANCE": "Zensurance",
     "FRESHBOOKS": "FreshBooks",
     "FN": "Mortgage (First National)",
+    "VANCOUVER PROPERTY TAXES": "Vancouver Property Taxes",
+    "VANCOUVERPROPERTYTAXES": "Vancouver Property Taxes",
+    "STRATFORDHALL": "Stratford Hall (Tuition)",
+    # Common merchants missing aliases
+    "AIRBNB": "Airbnb",
+    "IKEA": "IKEA",
+    "ARITZIA": "Aritzia",
+    "WINNERS": "Winners",
+    "NORTH SHORE KIA": "North Shore Kia",
+    "NORTHSHORE KIA": "North Shore Kia",
+    "SMASH VOLLEYBALL": "Smash Volleyball",
+    "MOUNT WASHINGTON": "Mount Washington",
+    "REVELSTOKE MOUNTAIN": "Revelstoke Mountain Resort",
+    "CHATGPT": "OpenAI (ChatGPT)",
+    "OPENAI": "OpenAI (ChatGPT)",
+    "CURSOR.COM": "Cursor IDE",
+    "CURSOR.SH": "Cursor IDE",
+    "FRONTENDMASTERS": "Frontend Masters",
+    "RESUME.IO": "Resume.io",
+    "NUBA": "Nuba Restaurant",
+    "LE PHO": "Le Pho Restaurant",
+    "MAENAM": "Maenam Restaurant",
+    "MARCELLO": "Marcello Ristorante",
+    "1ST AVE ANIMAL": "1st Ave Animal Hospital",
+    "KEATS CAMP": "Keats Camps",
+    "LARGE TUTORING": "Large Tutoring",
+    "PAINTED BOAT": "Painted Boat Resort",
+    "HOTEL PALACE": "Hotel Palace Royal",
+    "ACE HOTEL": "Ace Hotel",
+    "RICHMOND OLYMPIC": "Richmond Olympic Oval",
+    "LEAH MARKS": "Leah Marks Counselling",
+    # ScotiaBank no-space format aliases
+    "NORTHSHOREKIA": "North Shore Kia",
+    # Additional common merchants
+    "REVELATION LODGE": "Revelation Lodge",
+    "MODO OLYMPIC": "Modo Car Share",
+    "MODO_YOGA": "Modo Yoga",
+    "YUM ICE CREAM": "Yum Ice Creamery",
+    "BREKA BAKERY": "Breka Bakery",
+    "DEVILLE COFFEE": "Deville Coffee",
+    "BEAN AROUND": "Bean Around The World",
+    "COAST GOODS": "Coast Goods",
+    "MAH MILKBAR": "Mah Milkbar",
+    "STRATECHERY": "Stratechery",
+    "PULPFICTION": "Pulp Fiction Books",
+    "SWANK'S SALON": "Swank's Salon",
+    "BETA5 CHOCOLAT": "Beta5 Chocolates",
+    "HOMESENSE": "HomeSense",
+    "PARKING FALSE CREEK": "False Creek Parking",
+    "VANCOUVER PB RECREATIO": "Vancouver Parks Board",
+    "DR. MARINA LIARSKY": "Dr. Marina Liarsky (Chiropractor)",
+    "DRIVE PHARMACY": "The Drive Pharmacy",
+    "ANCHOR EATERY": "Anchor Eatery",
+    "BC PLACE": "BC Place",
+    "GRANT STREET WELLNESS": "Grant Street Wellness",
+    "TK'S GOURMET TURKISH": "TK's Gourmet Turkish",
+    "CAFE AMERICANO": "Cafe Americano",
+    "INTERMARCHE": "Intermarche",
+    "OPHELIA": "Ophelia Restaurant",
+    "RIO THEATRE": "Rio Theatre",
+    "BUMP N GRIND": "Bump N Grind Cafe",
+    "GENERATIONS OPTOMETRY": "Generations Optometry",
+    "COMMON SENSE PLUS": "Common Sense Plus",
+    "STEAMGAMES": "Steam Games",
+    "VANCOUVER SCHOOL BOARD": "Vancouver School Board",
+    "CLAUDE.AI": "Claude AI (Anthropic)",
+    "NVIDIA": "Nvidia",
+    "SHELL RECHARGE": "Shell EV Charging",
+    "CHARGEPOINT": "ChargePoint EV Charging",
+    "ON THE RUN EV": "On The Run EV Charging",
+    "GROUNDS FOR COFFEE": "Grounds For Coffee",
+    "THIERRY CHOCOLAT": "Thierry Chocolates",
+    "HAVANA VANCOUVER": "Havana Restaurant",
+    "ANGUS T": "Angus T (Fish & Chips)",
+    "KOKOPELLI": "Kokopelli Salon",
+    "MAVI JEANS": "Mavi Jeans",
+    "LA BAGUETTE": "La Baguette Catering",
+    "FLYING APRON": "The Flying Apron",
+    "PURR CLOTHING": "Purr Clothing",
+    "SECOND NATURE HOME": "Second Nature Home",
+    "RAINFLORIST": "Rainflorist",
+    "COAST GOODS": "Coast Goods",
+    "CHANCE CAFE": "Chance Cafe",
+    "SILVER CREEK TRAVEL": "Silver Creek Travel Centre",
+    "HOT CHOCOLATES": "Hot Chocolates",
 }
 
 # Business expenses — excluded from personal spending totals
 BUSINESS_MERCHANTS = {"Zensurance", "FreshBooks"}
+
+# Merchants that are always fixed costs, regardless of transaction source
+FIXED_COST_MERCHANTS = {
+    "Wawanesa Insurance", "BCAA Insurance", "ICBC",
+    "RBC Life Insurance", "Sun Life Insurance",
+    "Vancouver Property Taxes",
+}
 
 # Debt payoff thresholds — AFT_OUT amounts above these are one-time payoffs,
 # not regular spending. Regular payments (below threshold) remain as fixed costs.
@@ -207,12 +319,21 @@ CATEGORY_RULES = [
         "Alice And Brohm", "Bluebird Market", "The Burrow",
         "The Gumboot Cafe", "The Gumboot Restaurant", "Latin America",
         "Baked Cookies", "Toasty By Sprout", "Santa Barbara Market",
+        "Le Pho", "Nuba", "Maenam", "Marcello",
+        "Chai Restaurant", "Le Don Vegan", "Mediterranean Speciality",
+        "Chickpea", "Thaigo", "Fortune Wok", "Sushi Loku",
+        "Anchor Eatery", "Ophelia Restaurant", "TK's Gourmet Turkish",
+        "Mah Milkbar", "Cafe Americano", "Intermarche",
+        "Havana Restaurant", "Angus T", "La Baguette",
+        "The Flying Apron", "Hot Chocolates", "Chance Cafe",
     ]),
     ("Coffee Shops", [
         "Continental Coffee", "JJ Bean", "Prado Cafe", "Forecast Coffee",
         "Moja Coffee", "Starbucks", "Nemesis Coffee", "Kits Beach Coffee",
         "Bean Scene", "White Rabbit Coffee", "Bolacco", "Crema Cafe",
         "Parsonage Cafe",
+        "Breka Bakery", "Deville Coffee", "Bean Around", "Bump N Grind",
+        "Grounds For Coffee", "Matchstick", "Laughing Bean",
     ]),
     ("Bakeries & Treats", [
         "Cobs Bread", "Purebread", "Livia Sweets", "To Live For Bakery",
@@ -220,6 +341,7 @@ CATEGORY_RULES = [
         "The Bench Bakehouse", "Uprising Breads", "Terra Breads",
         "More Cafe", "That Churro", "The Bread Company", "Melt Confectionary",
         "Siegel", "Dilly Dally",
+        "Yum Ice Creamery", "Beta5 Chocolates", "Thierry Chocolates",
     ]),
     ("Groceries", [
         "Real Canadian Superstore", "IGA", "Safeway", "Save-On-Foods",
@@ -227,10 +349,12 @@ CATEGORY_RULES = [
         "City Avenue Market", "Fig Mart", "Persia Foods", "Mostafa",
         "The Grocery Store", "New Triple A", "Dundas KK", "Otter Co-op",
         "Good Fridays", "Choices Drive", "Flourist",
+        "Costco",
     ]),
     ("Liquor & Alcohol", [
         "BC Liquor", "Liberty Wine", "Legacy Liquor", "Sundance Liquor",
         "Strange Fellows", "Strathcona Beer", "Commercial Drive Licoric",
+        "Real Canadian Liquor Store",
     ]),
     ("Telecom", [
         "Telus", "Fido Mobile",
@@ -238,24 +362,30 @@ CATEGORY_RULES = [
     ("Streaming & Subscriptions", [
         "Netflix", "Disney+", "Bell Media", "Sportsnet NOW", "MUBI",
         "Apple Subscriptions", "Amazon Prime", "Open Heart Project",
-        "Brief Media",
+        "Brief Media", "Stratechery",
     ]),
     ("Pets", [
         "MrPets", "Pet Valu", "Pet Pantry", "Caulfeild Vet",
+        "1st Ave Animal Hospital",
     ]),
     ("Transportation", [
         "Lyft", "Uber", "BC Ferries", "Air Canada", "TransLink Compass",
         "Harbour Air", "Expedia",
+        "Modo Car Share",
     ]),
     ("Parking & Gas", [
         "PayByPhone", "Impark", "Honk Parking", "Petro-Canada",
         "Chevron", "Nwest Parking", "New West Parking", "Zipby",
+        "False Creek Parking", "Silver Creek Travel",
+        "Shell EV Charging", "ChargePoint EV", "On The Run EV",
     ]),
     ("Clothing", [
         "Ardene", "Old Navy", "Uniqlo", "Simons", "Lululemon", "Vessi",
         "JQ Clothing", "Mintage Vintage", "Funktional", "Urban Planet",
         "Shoe Company", "Quidditas", "Gatley", "Sool Of Thread",
         "Spool Of Thread", "Dressew",
+        "Aritzia", "Winners",
+        "Mavi Jeans", "Purr Clothing",
     ]),
     ("Sports & Outdoor", [
         "MEC", "Sport Chek", "Decathlon", "Sports Junkies", "Canucks",
@@ -263,24 +393,36 @@ CATEGORY_RULES = [
     ]),
     ("Ski Resorts", [
         "Sun Peaks", "Mt Seymour", "Big White",
+        "Mount Washington", "Revelstoke Mountain",
     ]),
     ("Home Improvement", [
         "Home Depot", "Rona", "Dal-Tile", "Lighting Warehouse",
         "Magnet Hardware", "Skyland Building", "Bartlett Tree",
         "Bear Country Property", "Figaros Garden",
+        "IKEA", "HomeSense", "Coast Goods", "Second Nature Home",
+        "Rainflorist",
     ]),
     ("Health & Beauty", [
         "London Drugs", "Shoppers Drug Mart", "Rexall", "New Visage",
         "Harlow Skin", "Body Energy", "Spice Beauty", "Paulie",
         "Caulfeild Pharmasave", "Hemlock Hospital",
         "Mount Pleasant Visio",
+        "Spautopia", "Leah Marks",
+        "Swank's Salon", "Dr. Marina Liarsky", "Grant Street Wellness",
+        "Modo Yoga", "The Drive Pharmacy", "Generations Optometry",
+        "Kokopelli Salon",
     ]),
     ("Dental", [
         "Yaletown Dentistry", "Cambie Broadway Dental", "Tot 2 Teen Dental",
         "Dr. Liat Tzur", "Sunrise Orthodontics",
     ]),
+    ("Software & SaaS", [
+        "OpenAI", "Cursor IDE", "Frontend Masters", "Resume.io",
+        "Claude AI", "Nvidia",
+    ]),
     ("Insurance", [
-        "ICBC", "BCAA Insurance", "Wawanesa",
+        "ICBC", "BCAA Insurance", "Wawanesa", "RBC Life Insurance", "Sun Life Insurance",
+        "Scotiabank Insurance",
     ]),
     ("Entertainment", [
         "Ticketmaster", "SeatGeek", "Eventbrite", "Cineplex",
@@ -288,6 +430,9 @@ CATEGORY_RULES = [
         "Spirit Halloween", "Games On The Drive", "Got Craft",
         "Red Horses Gallery", "Mosaic Books", "International Travel Maps",
         "The Anza Club",
+        "Smash Volleyball", "Richmond Olympic Oval",
+        "BC Place", "Rio Theatre", "Steam Games", "Pulp Fiction Books",
+        "Vancouver Parks Board",
     ]),
     ("Amazon", [
         "Amazon",
@@ -298,16 +443,21 @@ CATEGORY_RULES = [
     ("Auto", [
         "KAL Tire", "Shine Auto Wash", "Air-Serv", "Tesla", "Sony Wash",
         "Hyundai Car Payment",
+        "North Shore Kia",
     ]),
     ("Travel & Hotels", [
         "Best Western", "Nomade Cabo", "Merpago", "Clip Mx",
         "La Comer", "Tastes On The Fly", "0835_YVR",
+        "Airbnb", "Painted Boat", "Hotel Palace", "Ace Hotel", "Keats Camp",
+        "Revelation Lodge",
     ]),
     ("Donations", [
         "Make-A-Wish",
     ]),
     ("Education", [
         "Stratford Hall",
+        "Large Tutoring",
+        "Vancouver School Board",
     ]),
     ("Utilities", [
         "FortisBC", "BC Hydro",
@@ -315,7 +465,7 @@ CATEGORY_RULES = [
     ("Medical", [
     ]),
     ("Housing", [
-        "Mortgage",
+        "Mortgage", "Vancouver Property Taxes",
     ]),
 ]
 
@@ -348,6 +498,7 @@ CATEGORY_CONSOLIDATION = {
     "Insurance": "Insurance",
     "Streaming & Subscriptions": "Subscriptions & Telecom",
     "Telecom": "Subscriptions & Telecom",
+    "Software & SaaS": "Subscriptions & Telecom",
     "Pets": "Pets",
     "Donations": "Donations",
 }
@@ -435,6 +586,7 @@ def parse_csvs(folder: str) -> list[dict]:
         subpath = os.path.join(folder, subdir)
         if os.path.isdir(subpath):
             all_files.extend(sorted(glob.glob(os.path.join(subpath, "*.csv"))))
+            all_files.extend(sorted(glob.glob(os.path.join(subpath, "*", "*.csv"))))
     # Backward compat: check root folder for credit-card-*.csv
     root_csvs = sorted(glob.glob(os.path.join(folder, "credit-card-*.csv")))
     if root_csvs:
@@ -471,7 +623,7 @@ def parse_csvs(folder: str) -> list[dict]:
                         continue
                     category = categorize(merchant)
                     category = CATEGORY_CONSOLIDATION.get(category, category)
-                    transactions.append({
+                    entry = {
                         "date": date,
                         "month": date.strftime("%Y-%m"),
                         "raw_merchant": raw_merchant,
@@ -479,7 +631,10 @@ def parse_csvs(folder: str) -> list[dict]:
                         "category": category,
                         "amount": amount,
                         "source": "credit",
-                    })
+                    }
+                    if merchant in FIXED_COST_MERCHANTS:
+                        entry["fixed_cost"] = True
+                    transactions.append(entry)
 
             elif "transaction" in headers:
                 # ── Debit card format ──
@@ -497,7 +652,7 @@ def parse_csvs(folder: str) -> list[dict]:
                             continue
                         category = categorize(merchant)
                         category = CATEGORY_CONSOLIDATION.get(category, category)
-                        transactions.append({
+                        entry = {
                             "date": date,
                             "month": date.strftime("%Y-%m"),
                             "raw_merchant": description,
@@ -505,7 +660,10 @@ def parse_csvs(folder: str) -> list[dict]:
                             "category": category,
                             "amount": abs(amount),
                             "source": "debit",
-                        })
+                        }
+                        if merchant in FIXED_COST_MERCHANTS:
+                            entry["fixed_cost"] = True
+                        transactions.append(entry)
                     elif txn_type == "AFT_OUT":
                         # Extract merchant from "Pre-authorized Debit to MERCHANT"
                         merchant_raw = description
@@ -525,6 +683,28 @@ def parse_csvs(folder: str) -> list[dict]:
                             continue
                         category = categorize(merchant)
                         category = CATEGORY_CONSOLIDATION.get(category, category)
+                        transactions.append({
+                            "date": date,
+                            "month": date.strftime("%Y-%m"),
+                            "raw_merchant": description,
+                            "merchant": merchant,
+                            "category": category,
+                            "amount": amt,
+                            "source": "debit",
+                            "fixed_cost": True,
+                        })
+                    elif txn_type == "OBP_OUT":
+                        # Online bill payments (e.g. property taxes)
+                        # Extract merchant from "Online bill payment for MERCHANT, account ..."
+                        merchant_raw = description
+                        if "Online bill payment for " in description:
+                            merchant_raw = description.split("Online bill payment for ", 1)[1]
+                            merchant_raw = merchant_raw.split(",")[0]
+                        date = datetime.strptime(row["date"], "%Y-%m-%d")
+                        merchant = normalize_merchant(merchant_raw)
+                        category = categorize(merchant)
+                        category = CATEGORY_CONSOLIDATION.get(category, category)
+                        amt = abs(amount)
                         transactions.append({
                             "date": date,
                             "month": date.strftime("%Y-%m"),
@@ -558,90 +738,116 @@ def extract_passive_income(folder: str) -> dict | None:
     if not os.path.isdir(invest_dir):
         return None
 
-    csv_files = sorted(glob.glob(os.path.join(invest_dir, "*.csv")))
-    if not csv_files:
-        return None
+    portfolio_path = os.path.join(invest_dir, "portfolio.csv")
+    if not os.path.exists(portfolio_path):
+        # Fall back to any CSV in the investments directory
+        csv_files = sorted(glob.glob(os.path.join(invest_dir, "*.csv")))
+        if not csv_files:
+            return None
+        portfolio_path = csv_files[0]
 
-    EXCLUDE_TYPES = {"Corporate", "Property", "RESP"}
     ACCESSIBLE_TYPES = {"Non-reg", "Cash", "TFSA"}  # spendable without tax penalty
 
     accessible = []
     rrsp = []
+    corporate_accts = []
+    property_accts = []
+    resp_accts = []
 
-    for fpath in csv_files:
-        with open(fpath, newline="", encoding="utf-8-sig") as f:
-            reader = csv.reader(f)
-            next(reader)  # skip header row
+    with open(portfolio_path, newline="", encoding="utf-8-sig") as f:
+        reader = csv.reader(f)
+        header = next(reader)  # skip header row
 
-            for row in reader:
-                if len(row) < 10:
-                    continue
+        # Detect column indices from header
+        h = [c.strip().lower().replace("\n", " ") for c in header]
+        col_account = 0
+        col_type = next((i for i, c in enumerate(h) if "asset" in c or c == "type"), 2)
+        col_value = next((i for i, c in enumerate(h) if "total" in c and "value" in c), 4)
+        col_return = next((i for i, c in enumerate(h) if "return" in c), None)
+        col_yield = next((i for i, c in enumerate(h) if "yield" in c), None)
 
-                account = row[0].strip().replace("\n", " ")
-                asset_type = row[2].strip().replace("\n", " ")
+        for row in reader:
+            if len(row) <= max(col_account, col_type, col_value):
+                continue
 
-                # Skip excluded types and totals row
-                if asset_type in EXCLUDE_TYPES or not account:
-                    continue
+            account = row[col_account].strip().replace("\n", " ")
+            asset_type = row[col_type].strip().replace("\n", " ")
 
-                # Parse total value
-                val_str = row[4].strip().replace("$", "").replace(",", "")
+            # Skip totals row
+            if not account:
+                continue
+
+            # Parse total value
+            val_str = row[col_value].strip().replace("$", "").replace(",", "")
+            try:
+                total_value = float(val_str)
+            except (ValueError, TypeError):
+                continue
+            if total_value <= 0:
+                continue
+
+            # Parse yield — either explicit dollar amount or TBD
+            yield_str = row[col_yield].strip() if col_yield is not None and col_yield < len(row) else ""
+            if yield_str.upper() == "TBD" or not yield_str:
+                # Estimate from return rate * total value
+                rate_str = row[col_return].strip().replace("%", "") if col_return is not None and col_return < len(row) else ""
                 try:
-                    total_value = float(val_str)
+                    rate = float(rate_str) / 100
+                    annual_yield = total_value * rate
                 except (ValueError, TypeError):
-                    continue
-                if total_value <= 0:
-                    continue
+                    annual_yield = 0.0
+            else:
+                cleaned = yield_str.replace("$", "").replace(",", "")
+                try:
+                    annual_yield = float(cleaned)
+                except (ValueError, TypeError):
+                    annual_yield = 0.0
 
-                # Parse yield — either explicit dollar amount or TBD
-                yield_str = row[9].strip()
-                if yield_str.upper() == "TBD" or not yield_str:
-                    # Estimate from return rate * total value
-                    rate_str = row[8].strip().replace("%", "")
-                    try:
-                        rate = float(rate_str) / 100
-                        annual_yield = total_value * rate
-                    except (ValueError, TypeError):
-                        annual_yield = 0.0
-                else:
-                    cleaned = yield_str.replace("$", "").replace(",", "")
-                    try:
-                        annual_yield = float(cleaned)
-                    except (ValueError, TypeError):
-                        annual_yield = 0.0
+            entry = {
+                "account": account,
+                "type": asset_type,
+                "value": total_value,
+                "annual_yield": round(annual_yield, 2),
+            }
 
-                if annual_yield <= 0:
-                    continue
+            # Route to appropriate bucket
+            if asset_type == "Corporate":
+                corporate_accts.append(entry)
+            elif asset_type == "Property":
+                property_accts.append(entry)
+            elif asset_type == "RESP":
+                resp_accts.append(entry)
+            elif annual_yield > 0 and asset_type in ACCESSIBLE_TYPES:
+                accessible.append(entry)
+            elif annual_yield > 0 and asset_type == "RRSP":
+                rrsp.append(entry)
 
-                entry = {
-                    "account": account,
-                    "type": asset_type,
-                    "value": total_value,
-                    "annual_yield": round(annual_yield, 2),
-                }
-
-                if asset_type in ACCESSIBLE_TYPES:
-                    accessible.append(entry)
-                elif asset_type == "RRSP":
-                    rrsp.append(entry)
-
-    if not accessible and not rrsp:
+    if not accessible and not rrsp and not corporate_accts and not property_accts and not resp_accts:
         return None
 
     accessible_yield = sum(a["annual_yield"] for a in accessible)
     rrsp_yield = sum(a["annual_yield"] for a in rrsp)
     accessible_balance = sum(a["value"] for a in accessible)
     rrsp_balance = sum(a["value"] for a in rrsp)
+    corporate_balance = sum(a["value"] for a in corporate_accts)
+    property_balance = sum(a["value"] for a in property_accts)
+    resp_balance = sum(a["value"] for a in resp_accts)
 
     return {
         "annual_income": round(accessible_yield, 2),
-        "monthly_income": round(accessible_yield / 12, 2),
+        "monthly_income": round(accessible_yield / 12, 2) if accessible_yield else 0,
         "accounts": sorted(accessible, key=lambda a: a["annual_yield"], reverse=True),
         "accessible_balance": round(accessible_balance, 2),
         "rrsp_annual": round(rrsp_yield, 2),
-        "rrsp_monthly": round(rrsp_yield / 12, 2),
+        "rrsp_monthly": round(rrsp_yield / 12, 2) if rrsp_yield else 0,
         "rrsp_accounts": sorted(rrsp, key=lambda a: a["annual_yield"], reverse=True),
         "rrsp_balance": round(rrsp_balance, 2),
+        "corporate_accounts": corporate_accts,
+        "corporate_balance": round(corporate_balance, 2),
+        "property_accounts": property_accts,
+        "property_balance": round(property_balance, 2),
+        "resp_accounts": resp_accts,
+        "resp_balance": round(resp_balance, 2),
     }
 
 
@@ -657,7 +863,9 @@ def extract_transfers(folder: str) -> dict:
     if not os.path.isdir(debit_dir):
         return {}
 
-    for fpath in sorted(glob.glob(os.path.join(debit_dir, "*.csv"))):
+    debit_csvs = sorted(glob.glob(os.path.join(debit_dir, "*.csv")))
+    debit_csvs.extend(sorted(glob.glob(os.path.join(debit_dir, "*", "*.csv"))))
+    for fpath in debit_csvs:
         with open(fpath, newline="", encoding="utf-8-sig") as f:
             for row in csv.DictReader(f):
                 txn_type = row["transaction"]
@@ -688,6 +896,7 @@ def extract_corporate_income(folder: str) -> dict | None:
         return None
 
     csv_files = sorted(glob.glob(os.path.join(corp_dir, "*.csv")))
+    csv_files.extend(sorted(glob.glob(os.path.join(corp_dir, "*", "*.csv"))))
     if not csv_files:
         return None
 
@@ -1393,6 +1602,19 @@ def generate_html(data: dict, ai_html: str | None = None,
         for m in months
     ])
 
+    # Income chart data arrays (gross income, not post-tax)
+    income_chart_revenue = json.dumps([
+        round(corporate_income["revenue_monthly"].get(m, 0), 2)
+        if corporate_income else 0
+        for m in months
+    ])
+    income_chart_dividends = json.dumps([
+        round(corporate_income["dividends_monthly"].get(m, 0), 2)
+        if corporate_income else 0
+        for m in months
+    ])
+    income_chart_passive = json.dumps([round(monthly_passive, 2)] * len(months))
+
     # Combined sustainability metrics (passive + corporate income vs burn rate)
     if combined_monthly > 0 and burn_rate > 0:
         coverage_pct = combined_monthly / burn_rate * 100
@@ -1460,6 +1682,110 @@ def generate_html(data: dict, ai_html: str | None = None,
             </div>
             {savings_line}
         </div>
+    </div>"""
+
+    # ── Net Worth card ──
+    net_worth_card = ""
+    if passive_income:
+        nw_accessible = passive_income.get("accessible_balance", 0)
+        nw_rrsp = passive_income.get("rrsp_balance", 0)
+        nw_property = passive_income.get("property_balance", 0)
+        nw_corporate = passive_income.get("corporate_balance", 0)
+        nw_resp = passive_income.get("resp_balance", 0)
+        nw_total = nw_accessible + nw_rrsp + nw_property + nw_corporate + nw_resp
+
+        def fmt_compact(val):
+            if val >= 1_000_000:
+                return f"${val/1_000_000:.2f}M"
+            elif val >= 1_000:
+                return f"${val/1_000:.0f}K"
+            else:
+                return money(val)
+
+        nw_metrics = f"""
+            <div style="flex:1;min-width:120px;text-align:center">
+                <div style="font-size:0.78em;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Accessible</div>
+                <div style="font-size:1.4em;font-weight:600">{fmt_compact(nw_accessible)}</div>
+            </div>
+            <div style="flex:1;min-width:120px;text-align:center">
+                <div style="font-size:0.78em;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">RRSP</div>
+                <div style="font-size:1.4em;font-weight:600">{fmt_compact(nw_rrsp)}</div>
+            </div>"""
+        if nw_property > 0:
+            nw_metrics += f"""
+            <div style="flex:1;min-width:120px;text-align:center">
+                <div style="font-size:0.78em;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Property</div>
+                <div style="font-size:1.4em;font-weight:600">{fmt_compact(nw_property)}</div>
+            </div>"""
+        if nw_corporate > 0:
+            nw_metrics += f"""
+            <div style="flex:1;min-width:120px;text-align:center">
+                <div style="font-size:0.78em;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Corporate</div>
+                <div style="font-size:1.4em;font-weight:600">{fmt_compact(nw_corporate)}</div>
+            </div>"""
+        if nw_resp > 0:
+            nw_metrics += f"""
+            <div style="flex:1;min-width:120px;text-align:center">
+                <div style="font-size:0.78em;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">RESP</div>
+                <div style="font-size:1.4em;font-weight:600">{fmt_compact(nw_resp)}</div>
+            </div>"""
+        nw_metrics += f"""
+            <div style="flex:1;min-width:120px;text-align:center">
+                <div style="font-size:0.78em;color:var(--accent);text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Total</div>
+                <div style="font-size:1.6em;font-weight:700;color:var(--accent)">{fmt_compact(nw_total)}</div>
+            </div>"""
+
+        # Stacked bar segments
+        nw_segments = []
+        nw_colors = {
+            "Accessible": "#4e79a7",
+            "RRSP": "#76b7b2",
+            "Property": "#f28e2b",
+            "Corporate": "#59a14f",
+            "RESP": "#e15759",
+        }
+        for label, val, color in [
+            ("Accessible", nw_accessible, nw_colors["Accessible"]),
+            ("RRSP", nw_rrsp, nw_colors["RRSP"]),
+            ("Property", nw_property, nw_colors["Property"]),
+            ("Corporate", nw_corporate, nw_colors["Corporate"]),
+            ("RESP", nw_resp, nw_colors["RESP"]),
+        ]:
+            if val > 0 and nw_total > 0:
+                pct = val / nw_total * 100
+                nw_segments.append(
+                    f'<div style="width:{pct:.1f}%;background:{color};height:100%;display:inline-block" '
+                    f'title="{label}: {fmt_compact(val)} ({pct:.0f}%)"></div>'
+                )
+        nw_bar_html = "".join(nw_segments)
+
+        # Legend
+        nw_legend_items = []
+        for label, val, color in [
+            ("Accessible", nw_accessible, nw_colors["Accessible"]),
+            ("RRSP", nw_rrsp, nw_colors["RRSP"]),
+            ("Property", nw_property, nw_colors["Property"]),
+            ("Corporate", nw_corporate, nw_colors["Corporate"]),
+            ("RESP", nw_resp, nw_colors["RESP"]),
+        ]:
+            if val > 0:
+                nw_legend_items.append(
+                    f'<span style="display:inline-flex;align-items:center;gap:4px;margin-right:14px">'
+                    f'<span style="width:10px;height:10px;border-radius:2px;background:{color};display:inline-block"></span>'
+                    f'<span style="font-size:0.8em;color:var(--muted)">{label}</span></span>'
+                )
+        nw_legend = "".join(nw_legend_items)
+
+        net_worth_card = f"""
+    <div class="card" style="margin-bottom:20px">
+        <h2 style="margin-bottom:15px">Net Worth</h2>
+        <div style="display:flex;align-items:center;justify-content:space-around;flex-wrap:wrap;gap:10px;margin-bottom:18px">
+            {nw_metrics}
+        </div>
+        <div style="background:#eee;border-radius:6px;height:18px;overflow:hidden;font-size:0;line-height:0;white-space:nowrap">
+            {nw_bar_html}
+        </div>
+        <div style="margin-top:8px;text-align:center">{nw_legend}</div>
     </div>"""
 
     # ── Overview stats ──
@@ -1618,6 +1944,16 @@ def generate_html(data: dict, ai_html: str | None = None,
     {rrsp_html}
 </section>"""
 
+    # ── Income chart section ──
+    income_chart_section = ""
+    if corporate_income or passive_income:
+        income_chart_section = """
+<section class="card">
+    <h2>Income Overview</h2>
+    <p style="color:var(--muted);margin-bottom:15px">Monthly income breakdown &mdash; corporate revenue, dividends, and portfolio yield</p>
+    <div class="chart-container"><canvas id="incomeChart"></canvas></div>
+</section>"""
+
     # ── Tab buttons for conditional tabs ──
     income_tab_btn = ''
     if corporate_income or passive_income:
@@ -1755,6 +2091,7 @@ canvas {{ max-width: 100%; }}
 <div class="tab-panel active" id="tab-big-picture">
 <div id="overview"></div>
 {hero_card}
+{net_worth_card}
 <div class="stats">
     {overview_stats}
 </div>
@@ -1767,7 +2104,7 @@ canvas {{ max-width: 100%; }}
 </div>
 
 <!-- ═══ INCOME ═══ -->
-{'<div class="tab-panel" id="tab-income">' + corporate_section + passive_section + '</div>' if (corporate_income or passive_income) else ''}
+{'<div class="tab-panel" id="tab-income">' + income_chart_section + corporate_section + passive_section + '</div>' if (corporate_income or passive_income) else ''}
 
 <!-- ═══ SPENDING ANALYSIS ═══ -->
 <div class="tab-panel" id="tab-spending">
@@ -1880,6 +2217,31 @@ document.addEventListener('DOMContentLoaded', function() {{
     }});
 
     {fixed_chart_js}
+
+    // Income overview stacked bar chart
+    if (document.getElementById('incomeChart')) {{
+        new Chart(document.getElementById('incomeChart'), {{
+            type: 'bar',
+            data: {{
+                labels: {month_labels_json},
+                datasets: [
+                    {{ label: 'Passive Income', data: {income_chart_passive}, backgroundColor: '#27ae60', borderRadius: 4 }},
+                    {{ label: 'Corporate Revenue', data: {income_chart_revenue}, backgroundColor: '#4e79a7', borderRadius: 4 }},
+                    {{ label: 'Corporate Dividends', data: {income_chart_dividends}, backgroundColor: '#76b7b2', borderRadius: 4 }}
+                ]
+            }},
+            options: {{
+                responsive: true,
+                plugins: {{
+                    tooltip: {{ callbacks: {{ label: ctx => ctx.dataset.label + ': $' + ctx.parsed.y.toLocaleString(undefined, {{minimumFractionDigits:2}}) }} }}
+                }},
+                scales: {{
+                    x: {{ stacked: true }},
+                    y: {{ stacked: true, beginAtZero: true, ticks: {{ callback: v => '$' + (v/1000).toFixed(0) + 'k' }} }}
+                }}
+            }}
+        }});
+    }}
 
     // Sustainability chart — stacked area (income) vs burn line
     new Chart(document.getElementById('sustainabilityChart'), {{
