@@ -1566,27 +1566,13 @@ def generate_html(data: dict, ai_html: str | None = None,
     </table>
 </section>"""
 
-    # ── TOC links ──
-    # The Big Picture
-    toc_items = '<li><a href="#overview">Overview</a></li>'
-    toc_items += '\n    <li><a href="#sustainability">Sustainability</a></li>'
-    # Income
+    # ── Tab buttons for conditional tabs ──
+    income_tab_btn = ''
     if corporate_income:
-        toc_items += '\n    <li><a href="#corporate-income">Corporate Income</a></li>'
-    # Spending Analysis
-    toc_items += '\n    <li><a href="#charts">Charts</a></li>'
-    if fixed_detail:
-        toc_items += '\n    <li><a href="#fixed-discretionary">Fixed vs Discretionary</a></li>'
-    toc_items += '\n    <li><a href="#categories">Categories</a></li>'
-    toc_items += '\n    <li><a href="#subscriptions">Subscriptions</a></li>'
-    # Milestones
+        income_tab_btn = '<button data-tab="tab-income">Income</button>'
+    milestones_tab_btn = ''
     if debt_payoffs:
-        toc_items += '\n    <li><a href="#debt-freedom">Debt Freedom</a></li>'
-    # Deep Dives
-    if ai_html:
-        toc_items += '\n    <li><a href="#recommendations">AI Recommendations</a></li>'
-    toc_items += '\n    <li><a href="#top-merchants">Top Merchants</a></li>'
-    toc_items += '\n    <li><a href="#monthly-detail">Monthly Detail</a></li>'
+        milestones_tab_btn = '<button data-tab="tab-milestones">Milestones</button>'
 
     # ── Chart.js for stacked monthly bar ──
     if has_debit:
@@ -1689,38 +1675,46 @@ h2 {{ font-size: 1.3em; margin-bottom: 15px; color: var(--accent); border-bottom
 .ai-recommendations li:last-child {{ margin-bottom: 0; }}
 canvas {{ max-width: 100%; }}
 .noscript-table {{ margin-top: 10px; }}
-nav.toc {{ background: var(--card); border-radius: 12px; padding: 15px 25px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }}
-nav.toc ul {{ list-style: none; display: flex; flex-wrap: wrap; gap: 8px; }}
-nav.toc a {{ text-decoration: none; color: var(--accent); background: var(--bg); padding: 5px 14px; border-radius: 20px; font-size: 0.88em; font-weight: 500; transition: background 0.15s; }}
-nav.toc a:hover {{ background: var(--accent); color: #fff; }}
+.tab-nav {{ display: flex; flex-wrap: wrap; gap: 8px; background: var(--card); border-radius: 12px; padding: 15px 25px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }}
+.tab-nav button {{ border: none; cursor: pointer; font-family: inherit; color: var(--accent); background: var(--bg); padding: 7px 18px; border-radius: 20px; font-size: 0.88em; font-weight: 500; transition: background 0.15s, color 0.15s; }}
+.tab-nav button:hover {{ background: var(--accent); color: #fff; }}
+.tab-nav button.active {{ background: var(--accent); color: #fff; }}
+.tab-panel {{ display: none; }}
+.tab-panel.active {{ display: block; }}
 </style>
 </head>
 <body>
 <h1>Financial Dashboard</h1>
 <p class="subtitle">Personal &amp; corporate financial overview: {month_labels[0]} – {month_labels[-1]} | Generated {datetime.now().strftime('%b %d, %Y at %I:%M %p')}</p>
 
-<nav class="toc"><ul>
-    {toc_items}
-</ul></nav>
+<div class="tab-nav">
+    <button class="active" data-tab="tab-big-picture">The Big Picture</button>
+    {income_tab_btn}
+    <button data-tab="tab-spending">Spending</button>
+    {milestones_tab_btn}
+    <button data-tab="tab-deep-dives">Deep Dives</button>
+</div>
 
 <!-- ═══ THE BIG PICTURE ═══ -->
+<div class="tab-panel active" id="tab-big-picture">
 <div id="overview"></div>
 {hero_card}
 <div class="stats">
     {overview_stats}
 </div>
 
-<!-- Sustainability Chart -->
 <section id="sustainability" class="card">
     <h2>Monthly Sustainability</h2>
     <p style="color:var(--muted);margin-bottom:15px">Income + passive income vs monthly burn — the gap to close for financial independence</p>
     <div class="chart-container"><canvas id="sustainabilityChart"></canvas></div>
 </section>
+</div>
 
 <!-- ═══ INCOME ═══ -->
-{corporate_section}
+{'<div class="tab-panel" id="tab-income">' + corporate_section + '</div>' if corporate_income else ''}
 
 <!-- ═══ SPENDING ANALYSIS ═══ -->
+<div class="tab-panel" id="tab-spending">
 <div id="charts" class="chart-row">
     <div class="card">
         <h2>Monthly Spending{' (Credit + Debit)' if has_debit else ''}</h2>
@@ -1734,7 +1728,6 @@ nav.toc a:hover {{ background: var(--accent); color: #fff; }}
 
 {fixed_section}
 
-<!-- Category Table -->
 <section id="categories" class="card">
     <h2>Category Breakdown</h2>
     <table class="data-table">
@@ -1744,7 +1737,6 @@ nav.toc a:hover {{ background: var(--accent); color: #fff; }}
     </table>
 </section>
 
-<!-- Subscription Audit -->
 <section id="subscriptions" class="card">
     <h2>Subscription Audit</h2>
     <p style="color:var(--muted);margin-bottom:15px">Recurring charges detected across your statements. <span style="background:#27ae60;color:#fff;padding:1px 6px;border-radius:8px;font-size:0.8em">Stable</span> <span style="background:#f39c12;color:#fff;padding:1px 6px;border-radius:8px;font-size:0.8em">Price Change</span> <span style="background:#e74c3c;color:#fff;padding:1px 6px;border-radius:8px;font-size:0.8em">New / Stopped</span></p>
@@ -1755,14 +1747,15 @@ nav.toc a:hover {{ background: var(--accent); color: #fff; }}
     </table>
     </div>
 </section>
+</div>
 
 <!-- ═══ MILESTONES ═══ -->
-{debt_section}
+{'<div class="tab-panel" id="tab-milestones">' + debt_section + '</div>' if debt_payoffs else ''}
 
 <!-- ═══ DEEP DIVES ═══ -->
+<div class="tab-panel" id="tab-deep-dives">
 {ai_section}
 
-<!-- Top Merchants -->
 <section id="top-merchants" class="card">
     <h2>Top 20 Merchants</h2>
     <table class="data-table">
@@ -1771,12 +1764,30 @@ nav.toc a:hover {{ background: var(--accent); color: #fff; }}
     </table>
 </section>
 
-<!-- Monthly Detail -->
 <section id="monthly-detail" class="card">
     <h2>Monthly Detail</h2>
     {monthly_sections}
 </section>
+</div>
 
+<script>
+document.addEventListener('DOMContentLoaded', function() {{
+    document.querySelectorAll('.tab-nav button').forEach(function(btn) {{
+        btn.addEventListener('click', function() {{
+            document.querySelectorAll('.tab-nav button').forEach(function(b) {{ b.classList.remove('active'); }});
+            document.querySelectorAll('.tab-panel').forEach(function(p) {{ p.classList.remove('active'); }});
+            btn.classList.add('active');
+            document.getElementById(btn.dataset.tab).classList.add('active');
+            if (typeof Chart !== 'undefined') {{
+                document.getElementById(btn.dataset.tab).querySelectorAll('canvas').forEach(function(c) {{
+                    var chart = Chart.getChart(c);
+                    if (chart) chart.resize();
+                }});
+            }}
+        }});
+    }});
+}});
+</script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <script>
 document.addEventListener('DOMContentLoaded', function() {{
