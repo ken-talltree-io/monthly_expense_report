@@ -1004,10 +1004,11 @@ def analyze(transactions: list[dict], transfers: dict | None = None,
         merchant_monthly_counts[t["merchant"]][t["month"]] += 1
         merchant_categories[t["merchant"]] = t["category"]
 
-    # Categories that are NOT subscription-like (regular shopping/dining)
+    # Categories that are NOT subscription-like (regular spending, not services)
+    # Use consolidated category names (post CATEGORY_CONSOLIDATION mapping)
     NON_SUB_CATEGORIES = {
-        "Food & Dining", "Shopping", "Recreation",
-        "Housing & Utilities", "Transportation", "Travel",
+        "Food & Dining", "Groceries", "Shopping", "Recreation", "Pets",
+        "Health & Wellness", "Housing & Utilities", "Transportation", "Travel",
         "Kids & Education", "Donations",
     }
 
@@ -1044,9 +1045,9 @@ def analyze(transactions: list[dict], transfers: dict | None = None,
             # Always include known services regardless of consistency
             is_subscription = True
         elif is_non_sub_category:
-            # For retail/dining categories, require very tight consistency
-            # (catches things like barbershop monthly appointments)
-            if cv < 0.10 and len(present_months) >= 3 and avg_charges <= 1.2:
+            # For retail/dining/grocery categories, require very tight consistency
+            # and more months of evidence (catches barbershop, excludes one-off shops)
+            if cv < 0.10 and len(present_months) >= 4 and avg_charges <= 1.2:
                 is_subscription = True
         else:
             # For service-like categories (telecom, health, insurance, etc.)
@@ -1094,8 +1095,12 @@ def analyze(transactions: list[dict], transfers: dict | None = None,
         if present_months[0] in months_set[-2:]:
             status = "new"
             alerts.append("New recurring charge")
-        # Stopped subscription (absent in last month)
-        if present_months[-1] != months_set[-1]:
+        # Stopped subscription (absent in last completed month)
+        # Don't mark as stopped if the only missing month is the current
+        # (incomplete) month — the charge may not have posted yet.
+        current_month = datetime.now().strftime("%Y-%m")
+        last_complete = months_set[-2] if months_set[-1] == current_month and len(months_set) > 1 else months_set[-1]
+        if present_months[-1] != months_set[-1] and present_months[-1] < last_complete:
             status = "stopped"
             alerts.append(f"Last charge: {present_months[-1]}")
 
@@ -1106,6 +1111,7 @@ def analyze(transactions: list[dict], transfers: dict | None = None,
             "status": status,
             "alerts": alerts,
             "months_active": len(present_months),
+            "category": cat,
         })
 
     subscriptions.sort(key=lambda s: s["avg"], reverse=True)
@@ -1474,24 +1480,43 @@ def generate_html(data: dict, ai_html: str | None = None,
 
     # ── Build table rows ──
 
-    # Subscription table rows
-    sub_rows = ""
+    # Sub months (last 6 only) and headers
+    sub_months = months[-6:]
+    sub_month_headers = "".join(f"<th style='text-align:right'>{datetime.strptime(m, '%Y-%m').strftime('%b %Y')}</th>" for m in sub_months)
+
+    # Subscription table rows — grouped by status
+    sub_by_status = defaultdict(list)
     for s in data["subscriptions"]:
-        month_cells = ""
-        for m in months:
-            val = s["history"].get(m, 0)
-            if val > 0:
-                month_cells += f"<td style='text-align:right'>{money(val)}</td>"
-            else:
-                month_cells += "<td style='text-align:center;color:#ccc'>—</td>"
-        alert_html = "<br>".join(f"<small style='color:#e74c3c'>{a}</small>" for a in s["alerts"]) if s["alerts"] else ""
-        note = notes.get(s["merchant"].lower(), "")
-        note_html = f"<br><small style='color:#4e79a7;font-style:italic'>Note: {note}</small>" if note else ""
-        sub_rows += f"""<tr>
+        sub_by_status[s["status"]].append(s)
+
+    status_order = ["new", "price_change", "stopped", "stable"]
+    status_labels = {"stable": "Stable", "price_change": "Price Change", "new": "New", "stopped": "Stopped"}
+
+    sub_rows = ""
+    total_monthly = sum(s["avg"] for s in data["subscriptions"])
+    for status in status_order:
+        subs = sub_by_status.get(status, [])
+        if not subs:
+            continue
+        group_total = sum(s["avg"] for s in subs)
+        num_cols = len(sub_months) + 2  # Service + Avg + months
+        label = status_labels.get(status, status.title())
+        sub_rows += f'<tr style="background:var(--bg);font-weight:600"><td colspan="{num_cols}">{status_badge(status)} {label} — {money(group_total)}/mo ({len(subs)})</td></tr>'
+        for s in subs:
+            month_cells = ""
+            for m in sub_months:
+                val = s["history"].get(m, 0)
+                if val > 0:
+                    month_cells += f"<td style='text-align:right'>{money(val)}</td>"
+                else:
+                    month_cells += "<td style='text-align:center;color:#ccc'>—</td>"
+            alert_html = "<br>".join(f"<small style='color:#e74c3c'>{a}</small>" for a in s["alerts"]) if s["alerts"] else ""
+            note = notes.get(s["merchant"].lower(), "")
+            note_html = f"<br><small style='color:#4e79a7;font-style:italic'>Note: {note}</small>" if note else ""
+            sub_rows += f"""<tr>
             <td><strong>{s['merchant']}</strong>{('<br>' + alert_html) if alert_html else ''}{note_html}</td>
             <td style="text-align:right">{money(s['avg'])}</td>
             {month_cells}
-            <td style="text-align:center">{status_badge(s['status'])}</td>
         </tr>"""
 
     # Top merchants table
@@ -1533,9 +1558,6 @@ def generate_html(data: dict, ai_html: str | None = None,
                 <tbody>{txn_rows}</tbody>
             </table>
         </details>"""
-
-    # Sub month headers
-    sub_month_headers = "".join(f"<th style='text-align:right'>{datetime.strptime(m, '%Y-%m').strftime('%b %Y')}</th>" for m in months)
 
     # Trend indicator
     trend_arrow = "\u2191" if data["mom_change"] > 0 else "\u2193" if data["mom_change"] < 0 else "\u2192"
@@ -1585,35 +1607,6 @@ def generate_html(data: dict, ai_html: str | None = None,
     combined_monthly = monthly_passive + corp_monthly_takehome
     has_income = passive_income or corporate_income
 
-    # Sustainability chart data
-    sustainability_burn = json.dumps([round(adjusted_monthly[m], 2) for m in months])
-    sustainability_passive = json.dumps([round(monthly_passive, 2)] * len(months))
-    sustainability_income = json.dumps([
-        round((corporate_income["revenue_monthly"].get(m, 0) * CORPORATE_TAKE_HOME_RATE
-               + corporate_income["dividends_monthly"].get(m, 0)), 2)
-        if corporate_income else 0
-        for m in months
-    ])
-    sustainability_combined = json.dumps([
-        round(monthly_passive
-              + (corporate_income["revenue_monthly"].get(m, 0) * CORPORATE_TAKE_HOME_RATE
-                 + corporate_income["dividends_monthly"].get(m, 0))
-              if corporate_income else monthly_passive, 2)
-        for m in months
-    ])
-
-    # Income chart data arrays (gross income, not post-tax)
-    income_chart_revenue = json.dumps([
-        round(corporate_income["revenue_monthly"].get(m, 0), 2)
-        if corporate_income else 0
-        for m in months
-    ])
-    income_chart_dividends = json.dumps([
-        round(corporate_income["dividends_monthly"].get(m, 0), 2)
-        if corporate_income else 0
-        for m in months
-    ])
-    income_chart_passive = json.dumps([round(monthly_passive, 2)] * len(months))
 
     # Combined sustainability metrics (passive + corporate income vs burn rate)
     if combined_monthly > 0 and burn_rate > 0:
@@ -1895,13 +1888,19 @@ def generate_html(data: dict, ai_html: str | None = None,
     # ── Passive Income section ──
     passive_section = ""
     if passive_income:
-        # Accessible accounts table rows
+        # Accessible accounts table rows (sorted by yield desc, with heatmap)
         acc_rows = ""
+        acc_yields = [a['annual_yield'] for a in passive_income["accounts"]]
+        acc_max_yield = max(acc_yields) if acc_yields else 1
         for a in passive_income["accounts"]:
+            ret_pct = (a['annual_yield'] / a['value'] * 100) if a['value'] else 0
+            intensity = a['annual_yield'] / acc_max_yield if acc_max_yield else 0
+            heatmap_bg = f"rgba(39, 174, 96, {intensity * 0.35:.2f})"
             acc_rows += (
                 f"<tr><td>{a['account']}</td><td>{a['type']}</td>"
                 f"<td style='text-align:right'>{money(a['value'])}</td>"
-                f"<td style='text-align:right'>{money(a['annual_yield'])}</td></tr>"
+                f"<td style='text-align:right'>{ret_pct:.1f}%</td>"
+                f"<td style='text-align:right;background:{heatmap_bg}'>{money(a['annual_yield'])}</td></tr>"
             )
         acc_total_balance = passive_income["accessible_balance"]
         acc_total_annual = passive_income["annual_income"]
@@ -1911,20 +1910,26 @@ def generate_html(data: dict, ai_html: str | None = None,
         rrsp_html = ""
         if passive_income.get("rrsp_accounts"):
             rrsp_rows = ""
+            rrsp_yields = [a['annual_yield'] for a in passive_income["rrsp_accounts"]]
+            rrsp_max_yield = max(rrsp_yields) if rrsp_yields else 1
             for a in passive_income["rrsp_accounts"]:
+                ret_pct = (a['annual_yield'] / a['value'] * 100) if a['value'] else 0
+                intensity = a['annual_yield'] / rrsp_max_yield if rrsp_max_yield else 0
+                heatmap_bg = f"rgba(39, 174, 96, {intensity * 0.35:.2f})"
                 rrsp_rows += (
                     f"<tr><td>{a['account']}</td><td>{a['type']}</td>"
                     f"<td style='text-align:right'>{money(a['value'])}</td>"
-                    f"<td style='text-align:right'>{money(a['annual_yield'])}</td></tr>"
+                    f"<td style='text-align:right'>{ret_pct:.1f}%</td>"
+                    f"<td style='text-align:right;background:{heatmap_bg}'>{money(a['annual_yield'])}</td></tr>"
                 )
             rrsp_html = f"""
     <h3 style="margin-top:30px">RRSP Accounts <span style="font-weight:400;color:var(--muted);font-size:0.85em">(tax-sheltered — not accessible without penalty)</span></h3>
     <table class="data-table" style="max-width:700px">
-        <thead><tr><th>Account</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Annual Yield</th></tr></thead>
+        <thead><tr><th>Account</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Annual Yield</th></tr></thead>
         <tbody>{rrsp_rows}</tbody>
         <tfoot>
-            <tr style="font-weight:700"><td colspan="2">Total RRSP</td><td style="text-align:right">{money(passive_income['rrsp_balance'])}</td><td style="text-align:right">{money(passive_income['rrsp_annual'])}</td></tr>
-            <tr style="color:var(--muted)"><td colspan="3">Monthly Income</td><td style="text-align:right">{money(passive_income['rrsp_monthly'])}</td></tr>
+            <tr style="font-weight:700"><td colspan="2">Total RRSP</td><td style="text-align:right">{money(passive_income['rrsp_balance'])}</td><td style="text-align:right">{(passive_income['rrsp_annual'] / passive_income['rrsp_balance'] * 100) if passive_income['rrsp_balance'] else 0:.1f}%</td><td style="text-align:right">{money(passive_income['rrsp_annual'])}</td></tr>
+            <tr style="color:var(--muted)"><td colspan="4">Monthly Income</td><td style="text-align:right">{money(passive_income['rrsp_monthly'])}</td></tr>
         </tfoot>
     </table>"""
 
@@ -1934,25 +1939,18 @@ def generate_html(data: dict, ai_html: str | None = None,
     <p style="color:var(--muted);margin-bottom:15px">Yield from personal investment accounts — accessible balance breakdown</p>
     <h3>Accessible Accounts</h3>
     <table class="data-table" style="max-width:700px">
-        <thead><tr><th>Account</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Annual Yield</th></tr></thead>
+        <thead><tr><th>Account</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Annual Yield</th></tr></thead>
         <tbody>{acc_rows}</tbody>
         <tfoot>
-            <tr style="font-weight:700"><td colspan="2">Total Accessible</td><td style="text-align:right">{money(acc_total_balance)}</td><td style="text-align:right">{money(acc_total_annual)}</td></tr>
-            <tr style="color:var(--muted)"><td colspan="3">Monthly Income</td><td style="text-align:right">{money(acc_monthly)}</td></tr>
+            <tr style="font-weight:700"><td colspan="2">Total Accessible</td><td style="text-align:right">{money(acc_total_balance)}</td><td style="text-align:right">{(acc_total_annual / acc_total_balance * 100) if acc_total_balance else 0:.1f}%</td><td style="text-align:right">{money(acc_total_annual)}</td></tr>
+            <tr style="color:var(--muted)"><td colspan="4">Monthly Income</td><td style="text-align:right">{money(acc_monthly)}</td></tr>
         </tfoot>
     </table>
     {rrsp_html}
 </section>"""
 
-    # ── Income chart section ──
+    # ── Income chart section (removed — not useful) ──
     income_chart_section = ""
-    if corporate_income or passive_income:
-        income_chart_section = """
-<section class="card">
-    <h2>Income Overview</h2>
-    <p style="color:var(--muted);margin-bottom:15px">Monthly income breakdown &mdash; corporate revenue, dividends, and portfolio yield</p>
-    <div class="chart-container"><canvas id="incomeChart"></canvas></div>
-</section>"""
 
     # ── Tab buttons for conditional tabs ──
     income_tab_btn = ''
@@ -2096,11 +2094,6 @@ canvas {{ max-width: 100%; }}
     {overview_stats}
 </div>
 
-<section id="sustainability" class="card">
-    <h2>Monthly Sustainability</h2>
-    <p style="color:var(--muted);margin-bottom:15px">Income + passive income vs monthly burn — the gap to close for financial independence</p>
-    <div class="chart-container"><canvas id="sustainabilityChart"></canvas></div>
-</section>
 </div>
 
 <!-- ═══ INCOME ═══ -->
@@ -2132,11 +2125,12 @@ canvas {{ max-width: 100%; }}
 
 <section id="subscriptions" class="card">
     <h2>Subscription Audit</h2>
-    <p style="color:var(--muted);margin-bottom:15px">Recurring charges detected across your statements. <span style="background:#27ae60;color:#fff;padding:1px 6px;border-radius:8px;font-size:0.8em">Stable</span> <span style="background:#f39c12;color:#fff;padding:1px 6px;border-radius:8px;font-size:0.8em">Price Change</span> <span style="background:#e74c3c;color:#fff;padding:1px 6px;border-radius:8px;font-size:0.8em">New / Stopped</span></p>
+    <p style="color:var(--muted);margin-bottom:15px">Recurring charges detected across your statements, grouped by status.</p>
     <div style="overflow-x:auto">
     <table class="data-table">
-        <thead><tr><th>Service</th><th style="text-align:right">Avg/Mo</th>{sub_month_headers}<th style="text-align:center">Status</th></tr></thead>
+        <thead><tr><th>Service</th><th style="text-align:right">Avg/Mo</th>{sub_month_headers}</tr></thead>
         <tbody>{sub_rows}</tbody>
+        <tfoot><tr style="font-weight:700"><td>Total Subscriptions</td><td style="text-align:right">{money(total_monthly)}/mo</td><td colspan="{len(sub_months)}"></td></tr></tfoot>
     </table>
     </div>
 </section>
@@ -2218,116 +2212,7 @@ document.addEventListener('DOMContentLoaded', function() {{
 
     {fixed_chart_js}
 
-    // Income overview stacked bar chart
-    if (document.getElementById('incomeChart')) {{
-        new Chart(document.getElementById('incomeChart'), {{
-            type: 'bar',
-            data: {{
-                labels: {month_labels_json},
-                datasets: [
-                    {{ label: 'Passive Income', data: {income_chart_passive}, backgroundColor: '#27ae60', borderRadius: 4 }},
-                    {{ label: 'Corporate Revenue', data: {income_chart_revenue}, backgroundColor: '#4e79a7', borderRadius: 4 }},
-                    {{ label: 'Corporate Dividends', data: {income_chart_dividends}, backgroundColor: '#76b7b2', borderRadius: 4 }}
-                ]
-            }},
-            options: {{
-                responsive: true,
-                plugins: {{
-                    tooltip: {{ callbacks: {{ label: ctx => ctx.dataset.label + ': $' + ctx.parsed.y.toLocaleString(undefined, {{minimumFractionDigits:2}}) }} }}
-                }},
-                scales: {{
-                    x: {{ stacked: true }},
-                    y: {{ stacked: true, beginAtZero: true, ticks: {{ callback: v => '$' + (v/1000).toFixed(0) + 'k' }} }}
-                }}
-            }}
-        }});
-    }}
 
-    // Sustainability chart — stacked area (income) vs burn line
-    new Chart(document.getElementById('sustainabilityChart'), {{
-        type: 'line',
-        data: {{
-            labels: {month_labels_json},
-            datasets: [
-                {{
-                    label: 'Combined Income',
-                    data: {sustainability_combined},
-                    borderColor: 'rgba(52,152,219,0.7)',
-                    backgroundColor: 'rgba(52,152,219,0.15)',
-                    borderWidth: 1,
-                    pointRadius: 0,
-                    fill: 'origin',
-                    order: 3
-                }},
-                {{
-                    label: 'Passive Income',
-                    data: {sustainability_passive},
-                    borderColor: '#27ae60',
-                    backgroundColor: 'rgba(39,174,96,0.3)',
-                    borderWidth: 1,
-                    pointRadius: 0,
-                    fill: 'origin',
-                    order: 2
-                }},
-                {{
-                    label: 'Monthly Burn',
-                    data: {sustainability_burn},
-                    borderColor: '#e15759',
-                    borderWidth: 3,
-                    pointBackgroundColor: '#e15759',
-                    pointRadius: 3,
-                    fill: false,
-                    order: 1
-                }}
-            ]
-        }},
-        options: {{
-            responsive: true,
-            interaction: {{ mode: 'index', intersect: false }},
-            plugins: {{
-                legend: {{
-                    display: true,
-                    labels: {{
-                        usePointStyle: true,
-                        generateLabels: function(chart) {{
-                            const ds = chart.data.datasets;
-                            return [
-                                {{ text: 'Passive Income', fillStyle: 'rgba(39,174,96,0.3)', strokeStyle: '#27ae60', lineWidth: 1, pointStyle: 'rect' }},
-                                {{ text: 'Corporate Income', fillStyle: 'rgba(52,152,219,0.15)', strokeStyle: 'rgba(52,152,219,0.7)', lineWidth: 1, pointStyle: 'rect' }},
-                                {{ text: 'Monthly Burn', fillStyle: '#e15759', strokeStyle: '#e15759', lineWidth: 3, pointStyle: 'line' }}
-                            ];
-                        }}
-                    }}
-                }},
-                tooltip: {{
-                    callbacks: {{
-                        label: function(ctx) {{
-                            if (ctx.dataset.label === 'Combined Income') return null;
-                            return ctx.dataset.label + ': $' + ctx.parsed.y.toLocaleString(undefined, {{minimumFractionDigits:2}});
-                        }},
-                        afterBody: function(items) {{
-                            const combined = items.find(i => i.dataset.label === 'Combined Income');
-                            const burn = items.find(i => i.dataset.label === 'Monthly Burn');
-                            if (!combined || !burn) return '';
-                            const gap = (combined.parsed.y || 0) - (burn.parsed.y || 0);
-                            const sign = gap >= 0 ? '+' : '';
-                            return '  Combined: $' + (combined.parsed.y || 0).toLocaleString(undefined, {{minimumFractionDigits:2}})
-                                 + '\\n  Net: ' + sign + '$' + gap.toLocaleString(undefined, {{minimumFractionDigits:2}});
-                        }}
-                    }}
-                }}
-            }},
-            scales: {{
-                y: {{
-                    beginAtZero: true,
-                    ticks: {{ callback: v => '$' + (v/1000).toFixed(0) + 'k' }}
-                }},
-                x: {{
-                    ticks: {{ maxRotation: 45 }}
-                }}
-            }}
-        }}
-    }});
 }});
 </script>
 

@@ -12,6 +12,7 @@ import sys
 # ── Account name mappings ───────────────────────────────────────────────────
 # Map WS account numbers to friendly names (from existing CSV naming convention)
 WS_ACCOUNT_NAMES = {
+    "HQ89R0603CAD": "Ken Income",
     "HQ8G33Q05CAD": "ETF Income",
     "WK0536LQ4CAD": "Kids RESP",
     "WK4ZQ2P35CAD": "Joint Chequing",
@@ -21,6 +22,19 @@ WS_ACCOUNT_NAMES = {
     "WK6MMM500CAD": "Bond Income",
     "WK6RJ7L40CAD": "Ken RRSP (Summit)",
     "WK6S90WK6CAD": "Ken TFSA (Summit)",
+}
+
+# Known return rates for WS accounts (from CRM2 reports / prior data).
+# Used when monthly statements don't include return data.
+WS_RETURN_RATES = {
+    "HQ89R0603CAD": 5.58,   # Ken Income — self-directed income ETFs (ZWB, ZWU, ZRE, VDY)
+    "HQ8G33Q05CAD": 5.58,   # ETF Income — self-directed ETF portfolio
+    "WK0536LQ4CAD": 8.50,   # Kids RESP — from CRM2 2025 annual report
+    "WK4ZQ2P35CAD": 2.25,   # Joint Chequing — interest rate
+    "WK4ZSSJ33USD": 3.25,   # USD Savings — interest rate
+    "WK6MMM500CAD": 1.61,   # Bond Income — managed bond portfolio
+    "WK6RJ7L40CAD": 0.91,   # Ken RRSP (Summit) — recently opened
+    "WK6S90WK6CAD": 1.38,   # Ken TFSA (Summit) — recently opened
 }
 
 # Map Steadyhand account numbers to friendly names
@@ -100,10 +114,12 @@ def parse_wealthsimple_pdf(pdf_path: str) -> dict | None:
     # Extract account type — appears as a standalone centered line like "Managed TFSA Account"
     asset_type = None
     type_patterns = [
+        (r"Self-directed TFSA Account", "TFSA"),
         (r"Managed TFSA Account", "TFSA"),
         (r"Managed RRSP Account", "RRSP"),
         (r"Managed RESP Account", "RESP"),
         (r"Managed Non-Registered Account", "Non-reg"),
+        (r"Self-directed Non-Registered", "Non-reg"),
         (r"USD Savings Account", "Cash"),
         (r"Chequing Account", "Cash"),
         (r"Non-Registered Cash Account", "Non-reg"),
@@ -159,14 +175,23 @@ def parse_wealthsimple_pdf(pdf_path: str) -> dict | None:
     # Extract account suffix from account number
     acct_suffix = account_no
 
+    # Use known return rate if available
+    return_rate = WS_RETURN_RATES.get(account_no)
+    if return_rate is not None:
+        all_time_return = f"{return_rate:.2f}%"
+        annual_yield = f"${total_value_cad * return_rate / 100:,.2f}"
+    else:
+        all_time_return = "TBD"
+        annual_yield = "TBD"
+
     return {
         "account": account_name,
         "brokerage": "Wealthsimple",
         "asset_type": asset_type,
         "acct_suffix": acct_suffix,
         "total_value_cad": total_value_cad,
-        "all_time_return": "TBD",
-        "yield": "TBD",
+        "all_time_return": all_time_return,
+        "yield": annual_yield,
         "holdings": ", ".join(holdings) if holdings else "",
         "currency": currency,
     }
@@ -370,10 +395,17 @@ def main():
             if f.endswith(".pdf") and "_2026-01_v_1" in f and not f.startswith(".")
         ])
         print(f"Parsing {len(ws_pdfs)} Wealthsimple monthly statements")
+        seen_accts = set()
         for pdf_name in ws_pdfs:
             pdf_path = os.path.join(ws_dir, pdf_name)
             result = parse_wealthsimple_pdf(pdf_path)
             if result:
+                acct_suffix = result["acct_suffix"]
+                # Skip duplicates (e.g. macOS "(1).pdf" copies)
+                if acct_suffix in seen_accts:
+                    print(f"  Skipping duplicate {result['account']} ({acct_suffix})")
+                    continue
+                seen_accts.add(acct_suffix)
                 # Skip zero-value accounts
                 if result["total_value_cad"] <= 0:
                     print(f"  Skipping {result['account']} (zero value)")
