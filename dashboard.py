@@ -1103,22 +1103,28 @@ def extract_passive_income(folder: str) -> dict | None:
             if not account:
                 continue
 
-            # Parse total value (may be blank if statement is the source)
+            # Parse total value: portfolio.csv overrides, then statement, then 0
             val_str = row[col_value].strip().replace("$", "").replace(",", "")
+            csv_value = None
             try:
-                total_value = float(val_str)
+                csv_value = float(val_str)
             except (ValueError, TypeError):
-                total_value = 0.0
+                pass
 
-            # Overlay statement balance if available (authoritative source)
             acct_suffix = row[col_suffix].strip() if col_suffix is not None and col_suffix < len(row) else ""
             stmt = _find_stmt(acct_suffix)
-            if stmt:
+
+            if csv_value is not None and csv_value > 0:
+                total_value = csv_value
+                balance_source = "portfolio.csv"
+                statement_date = ""
+            elif stmt:
                 total_value = stmt["balance"]
                 balance_source = stmt["source"]
                 statement_date = stmt["date"]
             else:
-                balance_source = "portfolio.csv"
+                total_value = 0.0
+                balance_source = ""
                 statement_date = ""
 
             if total_value <= 0:
