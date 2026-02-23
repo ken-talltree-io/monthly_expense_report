@@ -2107,10 +2107,11 @@ def generate_html(data: dict, ai_html: str | None = None,
             val = data["category_monthly"].get(c, {}).get(m, 0)
             if val > heatmap_global_max:
                 heatmap_global_max = val
-    heatmap_rows = ""
+    heatmap_row_data = []
     for c, t, a, n in data["categories"]:
         monthly_vals = [data["category_monthly"].get(c, {}).get(m, 0) for m in heatmap_months]
-        cat_avg = sum(monthly_vals) / len(monthly_vals) if monthly_vals else 0
+        cat_total = sum(monthly_vals)
+        cat_avg = cat_total / len(monthly_vals) if monthly_vals else 0
         cells = ""
         for val in monthly_vals:
             intensity = (val / heatmap_global_max) if heatmap_global_max > 0 else 0
@@ -2118,10 +2119,11 @@ def generate_html(data: dict, ai_html: str | None = None,
             text_color = "#fff" if intensity > 0.5 else "var(--text)"
             cell_text = money(val) if val > 0 else '<span style="color:#ccc">\u2014</span>'
             cells += f"<td style='text-align:right;background:{bg};color:{text_color}'>{cell_text}</td>"
-        cat_total = sum(monthly_vals)
-        total_cell = f"<td style='text-align:right;font-weight:600'>{money(cat_total)}</td>"
         avg_cell = f"<td style='text-align:right;font-weight:600'>{money(cat_avg)}</td>"
-        heatmap_rows += f"<tr><td>{c}</td>{cells}{total_cell}{avg_cell}</tr>"
+        total_cell = f"<td style='text-align:right;font-weight:600'>{money(cat_total)}</td>"
+        heatmap_row_data.append((cat_total, f"<tr><td>{c}</td>{cells}{avg_cell}{total_cell}</tr>"))
+    heatmap_row_data.sort(key=lambda x: x[0], reverse=True)
+    heatmap_rows = "".join(row for _, row in heatmap_row_data)
 
     # ── Monthly Spotlight data prep ──
     current_month = datetime.now().strftime("%Y-%m")
@@ -2925,7 +2927,7 @@ canvas {{ max-width: 100%; }}
     <p style="color:var(--muted);margin-bottom:15px">Spending intensity by category over the last 6 months. Darker cells = higher relative spend.</p>
     <div style="overflow-x:auto">
     <table class="data-table">
-        <thead><tr><th>Category</th>{heatmap_month_headers}<th style="text-align:right">6m Total</th><th style="text-align:right">Avg</th></tr></thead>
+        <thead><tr><th>Category</th>{heatmap_month_headers}<th style="text-align:right">Avg</th><th style="text-align:right">6m Total</th></tr></thead>
         <tbody>{heatmap_rows}</tbody>
     </table>
     </div>
