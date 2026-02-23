@@ -1305,14 +1305,17 @@ def extract_passive_income(folder: str, source: str = "csv") -> dict | None:
     }
 
 
-def extract_transfers(folder: str) -> dict:
+def extract_transfers(folder: str) -> tuple[dict, list]:
     """Extract monthly transfer summary from debit card CSVs.
 
-    Returns dict of month -> {"in": float, "out": float}.
+    Returns (aggregates, incoming_etransfers) where:
+    - aggregates: dict of month -> {"in": float, "out": float}
+    - incoming_etransfers: list of {"date": date, "amount": float} for E_TRFIN
     Covers TRFOUT, TRFIN, TRFINTF, E_TRFOUT, E_TRFIN, EFTOUT.
     """
     TRANSFER_TYPES = {"TRFOUT", "TRFIN", "TRFINTF", "E_TRFOUT", "E_TRFIN", "EFTOUT"}
     transfers = defaultdict(lambda: {"in": 0.0, "out": 0.0})
+    incoming_etransfers = []
 
     # Scan transactions/personal/ recursively (transfers come from debit-format CSVs, auto-detected)
     txn_personal = os.path.join(folder, "transactions", "personal")
@@ -1320,7 +1323,7 @@ def extract_transfers(folder: str) -> dict:
         # Backward compat: try old path
         txn_personal = os.path.join(folder, "debit card")
         if not os.path.isdir(txn_personal):
-            return {}
+            return {}, []
 
     debit_csvs = sorted(glob.glob(os.path.join(txn_personal, "**", "*.csv"), recursive=True))
     for fpath in debit_csvs:
@@ -1338,11 +1341,46 @@ def extract_transfers(folder: str) -> dict:
 
                 if amount > 0:
                     transfers[month]["in"] += amount
+                    if txn_type == "E_TRFIN":
+                        incoming_etransfers.append({"date": date.date(), "amount": amount})
                 else:
                     transfers[month]["out"] += abs(amount)
 
-    return {m: {"in": round(v["in"], 2), "out": round(v["out"], 2)}
-            for m, v in transfers.items()}
+    aggregates = {m: {"in": round(v["in"], 2), "out": round(v["out"], 2)}
+                  for m, v in transfers.items()}
+    incoming_etransfers.sort(key=lambda t: t["date"], reverse=True)
+    return aggregates, incoming_etransfers
+
+
+def extract_bank_interest(folder: str) -> list:
+    """Extract INT (interest) transactions from personal and corporate debit CSVs.
+
+    Returns list of {"date": date, "amount": float, "account": str} sorted newest-first.
+    """
+    interest_txns = []
+
+    for subdir in ["personal", "corporate"]:
+        txn_dir = os.path.join(folder, "transactions", subdir)
+        if not os.path.isdir(txn_dir):
+            continue
+        for fpath in sorted(glob.glob(os.path.join(txn_dir, "**", "*.csv"), recursive=True)):
+            with open(fpath, newline="", encoding="utf-8-sig") as f:
+                reader = csv.DictReader(f)
+                if "transaction" not in (reader.fieldnames or []):
+                    continue
+                # Derive account name from parent folder
+                account = os.path.basename(os.path.dirname(fpath))
+                for row in reader:
+                    if row["transaction"] != "INT":
+                        continue
+                    amount = float(row["amount"])
+                    if amount <= 0:
+                        continue
+                    date = datetime.strptime(row["date"], "%Y-%m-%d").date()
+                    interest_txns.append({"date": date, "amount": amount, "account": account})
+
+    interest_txns.sort(key=lambda t: t["date"], reverse=True)
+    return interest_txns
 
 
 def extract_corporate_income(folder: str) -> dict | None:
@@ -1626,7 +1664,9 @@ def analyze(transactions: list[dict], transfers: dict | None = None,
 # ── AI Recommendations ──────────────────────────────────────────────────────
 
 def get_ai_recommendations(data: dict, passive_income: dict | None = None,
-                           corporate_income: dict | None = None) -> str | None:
+                           corporate_income: dict | None = None,
+                           incoming_etransfers: list | None = None,
+                           bank_interest: list | None = None) -> str | None:
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         print("Error: ANTHROPIC_API_KEY environment variable not set.")
@@ -1732,6 +1772,30 @@ def get_ai_recommendations(data: dict, passive_income: dict | None = None,
                     "change_pct": -decline_pct if latest_rev < prior_rev else round((latest_rev - prior_rev) / prior_rev * 100, 1),
                 }
 
+    # Incoming e-transfers (reimbursements)
+    if incoming_etransfers:
+        etransfer_in_by_month = defaultdict(float)
+        for t in incoming_etransfers:
+            m = str(t["date"])[:7]
+            etransfer_in_by_month[m] += t["amount"]
+        summary["incoming_etransfers"] = {
+            "total": round(sum(t["amount"] for t in incoming_etransfers), 2),
+            "count": len(incoming_etransfers),
+            "monthly": {m: round(v, 2) for m, v in sorted(etransfer_in_by_month.items())},
+        }
+
+    # Bank interest income
+    if bank_interest:
+        bi_by_month = defaultdict(float)
+        for t in bank_interest:
+            m = str(t["date"])[:7]
+            bi_by_month[m] += t["amount"]
+        summary["bank_interest"] = {
+            "total": round(sum(t["amount"] for t in bank_interest), 2),
+            "count": len(bank_interest),
+            "monthly": {m: round(v, 2) for m, v in sorted(bi_by_month.items())},
+        }
+
     # Burn rate & coverage — exclude paid-off debt merchant payments
     monthly_totals = data.get("monthly_totals", {})
     monthly_txns = data.get("monthly_txns", {})
@@ -1757,6 +1821,11 @@ def get_ai_recommendations(data: dict, passive_income: dict | None = None,
         combined_monthly += passive_income["monthly_income"]
     if corporate_income and "estimated_take_home_monthly" in summary.get("corporate_income", {}):
         combined_monthly += summary["corporate_income"]["estimated_take_home_monthly"]
+    num_months_for_avg = len(data.get("months", [])) or 1
+    if incoming_etransfers:
+        combined_monthly += sum(t["amount"] for t in incoming_etransfers) / num_months_for_avg
+    if bank_interest:
+        combined_monthly += sum(t["amount"] for t in bank_interest) / num_months_for_avg
 
     coverage_pct = round(combined_monthly / burn_rate * 100, 1) if burn_rate > 0 else 0
     accessible_balance = passive_income.get("accessible_balance", 0) if passive_income else 0
@@ -1837,10 +1906,12 @@ def generate_html(data: dict, ai_html: str | None = None,
                    notes: dict | None = None, budgets: dict | None = None,
                    passive_income: dict | None = None,
                    corporate_income: dict | None = None,
+                   incoming_etransfers: list | None = None,
+                   bank_interest: list | None = None,
                    folder: str = ".") -> str:
     notes = notes or {}
     budgets = budgets or {}
-    months = data["months"]
+    months = data["months"][-12:]  # Cap display window to last 12 months
     month_labels = [datetime.strptime(m, "%Y-%m").strftime("%b %Y") for m in months]
 
     # Color palette
@@ -1900,9 +1971,6 @@ def generate_html(data: dict, ai_html: str | None = None,
                 f'</div>')
 
     # ── Data preparation ──
-    cat_labels = json.dumps([c[0] for c in data["categories"]])
-    cat_values = json.dumps([c[1] for c in data["categories"]])
-    cat_colors = json.dumps(COLORS[:len(data["categories"])])
     monthly_values = json.dumps([data["monthly_totals"][m] for m in months])
     month_labels_json = json.dumps(month_labels)
 
@@ -1911,6 +1979,17 @@ def generate_html(data: dict, ai_html: str | None = None,
     credit_monthly = json.dumps([source_breakdown.get("credit", {}).get(m, 0) for m in months])
     debit_monthly = json.dumps([source_breakdown.get("debit", {}).get(m, 0) for m in months])
     has_debit = "debit" in source_breakdown
+
+    # 3-month rolling average for monthly spending chart
+    monthly_vals_raw = [data["monthly_totals"].get(m, 0) for m in months]
+    rolling_avg = []
+    for i in range(len(monthly_vals_raw)):
+        if i < 2:
+            rolling_avg.append(None)  # Not enough data for 3-month average
+        else:
+            avg = sum(monthly_vals_raw[i-2:i+1]) / 3
+            rolling_avg.append(round(avg, 2))
+    rolling_avg_json = json.dumps(rolling_avg)
 
     # Fixed costs data
     fixed_detail = data.get("fixed_cost_detail", [])
@@ -2032,18 +2111,128 @@ def generate_html(data: dict, ai_html: str | None = None,
             note_html = f'<span style="color:var(--muted);font-style:italic">{note}</span>' if note else ""
             etransfer_rows += f'<tr><td>{date_str}</td><td>{note_html}</td><td style="text-align:right">{money(t["amount"])}</td></tr>'
 
-    # Category table with sparklines and budget bars
+    # Category heatmap (last 6 months)
     has_budgets = bool(budgets)
-    cat_rows = ""
+    heatmap_months = months[-6:]
+    heatmap_month_headers = "".join(
+        f"<th style='text-align:right'>{datetime.strptime(m, '%Y-%m').strftime('%b')}</th>"
+        for m in heatmap_months
+    )
+    # Compute global max for single heatmap scale across all cells
+    heatmap_global_max = 0
     for c, t, a, n in data["categories"]:
-        monthly_vals = [data["category_monthly"].get(c, {}).get(m, 0) for m in months]
-        spark = sparkline(monthly_vals)
-        budget_cell = ""
-        if has_budgets:
-            target = budgets.get(c)
-            no_budget = '<span style="color:#ccc">—</span>'
-            budget_cell = f"<td>{budget_bar(a, target) if target else no_budget}</td>"
-        cat_rows += f"<tr><td>{c}</td><td style='text-align:right'>{money(t)}</td><td style='text-align:right'>{money(a)}</td>{budget_cell}<td style='text-align:center'>{spark}</td><td style='text-align:center'>{n}</td></tr>"
+        for m in heatmap_months:
+            val = data["category_monthly"].get(c, {}).get(m, 0)
+            if val > heatmap_global_max:
+                heatmap_global_max = val
+    heatmap_rows = ""
+    for c, t, a, n in data["categories"]:
+        monthly_vals = [data["category_monthly"].get(c, {}).get(m, 0) for m in heatmap_months]
+        cat_avg = sum(monthly_vals) / len(monthly_vals) if monthly_vals else 0
+        cells = ""
+        for val in monthly_vals:
+            intensity = (val / heatmap_global_max) if heatmap_global_max > 0 else 0
+            bg = f"rgba(78, 121, 167, {intensity:.2f})"
+            text_color = "#fff" if intensity > 0.5 else "var(--text)"
+            cell_text = money(val) if val > 0 else '<span style="color:#ccc">\u2014</span>'
+            cells += f"<td style='text-align:right;background:{bg};color:{text_color}'>{cell_text}</td>"
+        avg_cell = f"<td style='text-align:right;font-weight:600'>{money(cat_avg)}</td>"
+        heatmap_rows += f"<tr><td>{c}</td>{cells}{avg_cell}</tr>"
+
+    # ── Monthly Spotlight data prep ──
+    current_month = datetime.now().strftime("%Y-%m")
+    # Pick the most recent month with data (max statement date)
+    spotlight_html = ""
+    spot_month = months[-1] if months else None
+    if spot_month:
+        is_partial = spot_month == current_month
+        spot_label = datetime.strptime(spot_month, "%Y-%m").strftime("%B %Y")
+        if is_partial:
+            spot_label += " (in progress)"
+        spot_total = data["monthly_totals"].get(spot_month, 0)
+
+        # Delta vs prior month
+        spot_idx = months.index(spot_month) if spot_month in months else -1
+        prior_month = months[spot_idx - 1] if spot_idx > 0 else None
+        prior_total = data["monthly_totals"].get(prior_month, 0) if prior_month else 0
+        delta_prior = spot_total - prior_total if prior_month else 0
+        delta_prior_pct = (delta_prior / prior_total * 100) if prior_total > 0 else 0
+
+        # Delta vs 3-month average (use months before the spotlight month)
+        prev_months = months[:spot_idx] if spot_idx > 0 else []
+        avg_months = prev_months[-3:] if len(prev_months) >= 3 else prev_months
+        avg_3mo = sum(data["monthly_totals"].get(m, 0) for m in avg_months) / len(avg_months) if avg_months else 0
+        delta_avg = spot_total - avg_3mo if avg_3mo > 0 else 0
+        delta_avg_pct = (delta_avg / avg_3mo * 100) if avg_3mo > 0 else 0
+
+        def delta_badge(val, pct):
+            """Green for decrease (good), red for increase (bad)."""
+            if val > 0:
+                color = "#e15759"
+                arrow = "\u2191"
+            elif val < 0:
+                color = "#27ae60"
+                arrow = "\u2193"
+            else:
+                return '<span style="color:var(--muted)">\u2014</span>'
+            return (f'<span style="color:{color};font-weight:600">{arrow} {money(abs(val))} '
+                    f'({abs(pct):.0f}%)</span>')
+
+        # Top 5 categories for spotlight month
+        spot_cats = []
+        for c, _, _, _ in data["categories"]:
+            val = data["category_monthly"].get(c, {}).get(spot_month, 0)
+            prior_val = data["category_monthly"].get(c, {}).get(prior_month, 0) if prior_month else 0
+            if val > 0:
+                spot_cats.append((c, val, val - prior_val))
+        spot_cats.sort(key=lambda x: x[1], reverse=True)
+        spot_cats = spot_cats[:5]
+
+        top_cats_rows = ""
+        for cat_name, cat_val, cat_delta in spot_cats:
+            mom_cell = '<td style="text-align:right;color:var(--muted)">&mdash;</td>'
+            if prior_month and cat_delta != 0:
+                d_color = "#e15759" if cat_delta > 0 else "#27ae60"
+                d_arrow = "\u2191" if cat_delta > 0 else "\u2193"
+                mom_cell = f'<td style="text-align:right"><span style="color:{d_color};font-size:0.85em">{d_arrow} {money(abs(cat_delta))}</span></td>'
+            budget_cell = ""
+            if has_budgets:
+                target = budgets.get(cat_name)
+                no_budget = '<span style="color:#ccc">\u2014</span>'
+                budget_cell = f"<td>{budget_bar(cat_val, target) if target else no_budget}</td>"
+            top_cats_rows += f"<tr><td>{cat_name}</td><td style='text-align:right'>{money(cat_val)}</td>{mom_cell}{budget_cell}</tr>"
+
+        # Top 5 biggest transactions for spotlight month
+        spot_txns = sorted(data["monthly_txns"].get(spot_month, []), key=lambda t: t["amount"], reverse=True)[:5]
+        top_txn_rows = ""
+        for t in spot_txns:
+            top_txn_rows += f"<tr><td>{t['merchant']}</td><td style='text-align:center'>{t['date'].strftime('%b %d')}</td><td style='text-align:right'>{money(t['amount'])}</td></tr>"
+
+        spotlight_html = f"""
+<section class="card" style="margin-bottom:20px">
+    <h2>Monthly Spotlight: {spot_label}</h2>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:15px;margin-bottom:20px">
+        <div class="stat"><div class="value">{money(spot_total)}</div><div class="label">Total Spend</div></div>
+        <div class="stat"><div class="value">{delta_badge(delta_prior, delta_prior_pct)}</div><div class="label">vs Prior Month</div></div>
+        <div class="stat"><div class="value">{delta_badge(delta_avg, delta_avg_pct)}</div><div class="label">vs 3-Month Avg</div></div>
+    </div>
+    <div class="chart-row">
+        <div>
+            <h3 style="font-size:1em;margin-bottom:10px;color:var(--accent)">Top Categories</h3>
+            <table class="data-table">
+                <thead><tr><th>Category</th><th style="text-align:right">Amount</th><th style="text-align:right">MoM</th>{'<th>vs Budget</th>' if has_budgets else ''}</tr></thead>
+                <tbody>{top_cats_rows}</tbody>
+            </table>
+        </div>
+        <div>
+            <h3 style="font-size:1em;margin-bottom:10px;color:var(--accent)">Biggest Transactions</h3>
+            <table class="data-table">
+                <thead><tr><th>Merchant</th><th style="text-align:center">Date</th><th style="text-align:right">Amount</th></tr></thead>
+                <tbody>{top_txn_rows}</tbody>
+            </table>
+        </div>
+    </div>
+</section>"""
 
     # Trend indicator
     trend_arrow = "\u2191" if data["mom_change"] > 0 else "\u2193" if data["mom_change"] < 0 else "\u2192"
@@ -2055,6 +2244,20 @@ def generate_html(data: dict, ai_html: str | None = None,
     for merchant, total_amt, by_month in fixed_detail:
         monthly_avg = total_amt / num_months
         fixed_rows += f"<tr><td>{merchant}</td><td style='text-align:right'>{money(total_amt)}</td><td style='text-align:right'>{money(monthly_avg)}</td></tr>"
+
+    # Fixed vs discretionary per-month data (last 6 months) for stacked bar chart
+    fixed_disc_months = months[-6:]
+    fixed_disc_labels = json.dumps([datetime.strptime(m, "%Y-%m").strftime("%b") for m in fixed_disc_months])
+    fixed_per_month = []
+    disc_per_month = []
+    for m in fixed_disc_months:
+        fixed_m = data.get("fixed_costs", {}).get(m, 0)
+        total_m = data["monthly_totals"].get(m, 0)
+        disc_m = total_m - fixed_m
+        fixed_per_month.append(round(fixed_m, 2))
+        disc_per_month.append(round(max(disc_m, 0), 2))
+    fixed_per_month_json = json.dumps(fixed_per_month)
+    disc_per_month_json = json.dumps(disc_per_month)
 
     # AI section
     ai_section = ""
@@ -2090,8 +2293,15 @@ def generate_html(data: dict, ai_html: str | None = None,
 
     corp_revenue_takehome = round(corp_revenue_avg * CORPORATE_TAKE_HOME_RATE, 2)
     corp_monthly_takehome = corp_revenue_takehome + corp_div_avg
-    combined_monthly = monthly_passive + corp_monthly_takehome
-    has_income = passive_income or corporate_income
+
+    # Other actual income — monthly averages over the reporting period
+    num_months_total = len(months) or 1
+    etransfer_in_monthly_avg = round(sum(t["amount"] for t in (incoming_etransfers or [])) / num_months_total, 2)
+    bank_interest_monthly_avg = round(sum(t["amount"] for t in (bank_interest or [])) / num_months_total, 2)
+    other_income_monthly = etransfer_in_monthly_avg + bank_interest_monthly_avg
+
+    combined_monthly = monthly_passive + corp_monthly_takehome + other_income_monthly
+    has_income = passive_income or corporate_income or incoming_etransfers or bank_interest
 
 
     # Combined sustainability metrics (passive + corporate income vs burn rate)
@@ -2126,6 +2336,24 @@ def generate_html(data: dict, ai_html: str | None = None,
                 savings_line = f'<div style="font-size:0.85em;color:var(--muted);margin-top:4px">Accessible savings: {money(accessible_balance)} &middot; {runway:.0f} months runway</div>'
             else:
                 savings_line = f'<div style="font-size:0.85em;color:var(--muted);margin-top:4px">Accessible savings: {money(accessible_balance)}</div>'
+        other_income_block = ""
+        if other_income_monthly > 0:
+            # Build subtitle showing breakdown
+            other_parts = []
+            if etransfer_in_monthly_avg > 0:
+                other_parts.append(f"e-transfers {money(etransfer_in_monthly_avg)}")
+            if bank_interest_monthly_avg > 0:
+                other_parts.append(f"interest {money(bank_interest_monthly_avg)}")
+            other_subtitle = " + ".join(other_parts)
+            other_income_block = f"""
+            <div style="flex:0 0 40px;text-align:center">
+                <div style="font-size:1.8em;color:var(--muted)">+</div>
+            </div>
+            <div style="flex:1;min-width:160px;text-align:center">
+                <div style="font-size:0.85em;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Other Income</div>
+                <div style="font-size:2.2em;font-weight:700;color:#27ae60">{money(other_income_monthly)}<span style="font-size:0.4em;font-weight:400;color:var(--muted)">/mo</span></div>
+                <div style="font-size:0.85em;color:var(--muted)">{other_subtitle}</div>
+            </div>"""
         hero_card = f"""
     <div class="card" style="margin-bottom:20px">
         <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:20px">
@@ -2142,6 +2370,7 @@ def generate_html(data: dict, ai_html: str | None = None,
                 <div style="font-size:2.2em;font-weight:700;color:#27ae60">{money(monthly_passive)}<span style="font-size:0.4em;font-weight:400;color:var(--muted)">/mo</span></div>
                 <div style="font-size:0.85em;color:var(--muted)">portfolio yield</div>
             </div>
+            {other_income_block}
             <div style="flex:0 0 40px;text-align:center">
                 <div style="font-size:1.8em;color:var(--muted)">vs</div>
             </div>
@@ -2270,6 +2499,21 @@ def generate_html(data: dict, ai_html: str | None = None,
         overview_stats += f"""
     <div class="stat"><div class="value" style="color:#27ae60">{money(cashback_total)}</div><div class="label">VISA Cash-Back ({len(months)} months)</div></div>"""
 
+    # ── Total income stat (actual cash received) ──
+    total_income_actual = 0.0
+    if corporate_income:
+        total_income_actual += corporate_income["total_income"]
+    if incoming_etransfers:
+        total_income_actual += sum(t["amount"] for t in incoming_etransfers)
+    if bank_interest:
+        total_income_actual += sum(t["amount"] for t in bank_interest)
+    if total_income_actual > 0:
+        income_num_months = len(months) or 1
+        income_monthly_avg = total_income_actual / income_num_months
+        overview_stats += f"""
+    <div class="stat"><div class="value" style="color:#27ae60">{money(total_income_actual)}</div><div class="label">Total Income ({len(months)} months)</div></div>
+    <div class="stat"><div class="value" style="color:#27ae60">{money(income_monthly_avg)}</div><div class="label">Avg Monthly Income</div></div>"""
+
     # ── Debt Freedom section ──
     debt_section = ""
     if debt_payoffs:
@@ -2316,7 +2560,7 @@ def generate_html(data: dict, ai_html: str | None = None,
             </table>
         </div>
         <div>
-            <div class="chart-container"><canvas id="fixedChart"></canvas></div>
+            <div class="chart-container"><canvas id="fixedDiscChart"></canvas></div>
         </div>
     </div>
 </section>"""
@@ -2358,6 +2602,76 @@ def generate_html(data: dict, ai_html: str | None = None,
             <tr style="font-weight:700"><td>Total</td><td style="text-align:right">{money(corporate_income['revenue_total'])}</td><td style="text-align:right">{money(corporate_income['dividends_total'])}</td><td style="text-align:right">{money(corporate_income['total_income'])}</td></tr>
             <tr style="color:var(--muted)"><td>Trailing Avg (3-mo)</td><td style="text-align:right">{money(corp_revenue_avg)}</td><td style="text-align:right">{money(corp_div_avg)}</td><td style="text-align:right">{money(corp_trailing_total_avg)}</td></tr>
         </tfoot>
+    </table>
+</section>"""
+
+    # ── Incoming e-Transfers section ──
+    incoming_etransfers = incoming_etransfers or []
+    etransfer_income_section = ""
+    if incoming_etransfers:
+        # Load annotations from etransfer-notes-in.csv (date,amount,note)
+        etransfer_in_notes = {}
+        in_notes_path = os.path.join(folder, "etransfer-notes-in.csv")
+        if os.path.exists(in_notes_path):
+            with open(in_notes_path, newline="") as f:
+                for row in csv.DictReader(f):
+                    amt = row["amount"].replace("$", "").replace(",", "")
+                    key = (row["date"], amt)
+                    if row.get("note", "").strip():
+                        etransfer_in_notes[key] = row["note"].strip()
+        # Group by month
+        etransfer_in_by_month = {}
+        for t in incoming_etransfers:
+            m = str(t["date"])[:7]
+            etransfer_in_by_month.setdefault(m, []).append(t)
+        etransfer_in_rows = ""
+        etransfer_in_total = sum(t["amount"] for t in incoming_etransfers)
+        for m in sorted(etransfer_in_by_month, reverse=True):
+            txns = etransfer_in_by_month[m]
+            month_label = datetime.strptime(m, "%Y-%m").strftime("%b %Y")
+            month_total = sum(t["amount"] for t in txns)
+            etransfer_in_rows += f'<tr style="background:var(--bg);font-weight:600"><td colspan="2">{month_label}</td><td style="text-align:right">{money(month_total)}</td></tr>'
+            for t in txns:
+                date_str = str(t["date"])[:10]
+                amt_str = f'{t["amount"]:.2f}'
+                note = etransfer_in_notes.get((date_str, amt_str), "")
+                note_html = f'<span style="color:var(--muted);font-style:italic">{note}</span>' if note else ""
+                etransfer_in_rows += f'<tr><td>{date_str}</td><td>{note_html}</td><td style="text-align:right">{money(t["amount"])}</td></tr>'
+        etransfer_income_section = f"""
+<section id="incoming-etransfers" class="card">
+    <h2>Incoming e-Transfers</h2>
+    <p style="color:var(--muted);margin-bottom:15px">Interac e-Transfer reimbursements received &mdash; {len(incoming_etransfers)} transactions totalling {money(etransfer_in_total)}</p>
+    <table class="data-table" style="max-width:600px">
+        <thead><tr><th>Date</th><th>Note</th><th style="text-align:right">Amount</th></tr></thead>
+        <tbody>{etransfer_in_rows}</tbody>
+    </table>
+</section>"""
+
+    # ── Bank Interest section ──
+    bank_interest = bank_interest or []
+    bank_interest_section = ""
+    if bank_interest:
+        bi_by_month = {}
+        for t in bank_interest:
+            m = str(t["date"])[:7]
+            bi_by_month.setdefault(m, []).append(t)
+        bi_total = sum(t["amount"] for t in bank_interest)
+        bi_rows = ""
+        for m in sorted(bi_by_month, reverse=True):
+            txns = bi_by_month[m]
+            month_label = datetime.strptime(m, "%Y-%m").strftime("%b %Y")
+            month_total = sum(t["amount"] for t in txns)
+            bi_rows += f'<tr style="background:var(--bg);font-weight:600"><td colspan="2">{month_label}</td><td style="text-align:right">{money(month_total)}</td></tr>'
+            for t in sorted(txns, key=lambda x: x["date"], reverse=True):
+                date_str = str(t["date"])[:10]
+                bi_rows += f'<tr><td>{date_str}</td><td>{t["account"]}</td><td style="text-align:right">{money(t["amount"])}</td></tr>'
+        bank_interest_section = f"""
+<section id="bank-interest" class="card">
+    <h2>Bank Interest</h2>
+    <p style="color:var(--muted);margin-bottom:15px">Interest earned on cash and savings accounts &mdash; {len(bank_interest)} payments totalling {money(bi_total)}</p>
+    <table class="data-table" style="max-width:600px">
+        <thead><tr><th>Date</th><th>Account</th><th style="text-align:right">Amount</th></tr></thead>
+        <tbody>{bi_rows}</tbody>
     </table>
 </section>"""
 
@@ -2504,7 +2818,7 @@ def generate_html(data: dict, ai_html: str | None = None,
 
     # ── Tab buttons for conditional tabs ──
     income_tab_btn = ''
-    if corporate_income or passive_income:
+    if corporate_income or passive_income or incoming_etransfers or bank_interest:
         income_tab_btn = '<button data-tab="tab-income">Income</button>'
     milestones_tab_btn = ''
     if debt_payoffs:
@@ -2513,16 +2827,22 @@ def generate_html(data: dict, ai_html: str | None = None,
     if ai_html:
         ai_tab_btn = '<button data-tab="tab-ai">AI Recommendations</button>'
 
-    # ── Chart.js for stacked monthly bar ──
+    # ── Chart.js for stacked monthly bar + rolling average line ──
     if has_debit:
-        monthly_chart_js = f"""
+        bar_datasets = f"""
+                {{ label: 'Credit Card', data: {credit_monthly}, backgroundColor: '#4e79a7', borderRadius: 4, order: 2 }},
+                {{ label: 'Debit Card', data: {debit_monthly}, backgroundColor: '#76b7b2', borderRadius: 4, order: 2 }},"""
+    else:
+        bar_datasets = f"""
+                {{ label: 'Monthly Spend', data: {monthly_values}, backgroundColor: '#4e79a7', borderRadius: 6, order: 2 }},"""
+
+    monthly_chart_js = f"""
     new Chart(document.getElementById('monthlyChart'), {{
         type: 'bar',
         data: {{
             labels: {month_labels_json},
-            datasets: [
-                {{ label: 'Credit Card', data: {credit_monthly}, backgroundColor: '#4e79a7', borderRadius: 4 }},
-                {{ label: 'Debit Card', data: {debit_monthly}, backgroundColor: '#76b7b2', borderRadius: 4 }}
+            datasets: [{bar_datasets}
+                {{ label: '3-Mo Avg', data: {rolling_avg_json}, type: 'line', borderColor: '#e15759', borderWidth: 2, borderDash: [6, 3], pointRadius: 0, fill: false, order: 1, spanGaps: true }}
             ]
         }},
         options: {{
@@ -2536,36 +2856,29 @@ def generate_html(data: dict, ai_html: str | None = None,
             }}
         }}
     }});"""
-    else:
-        monthly_chart_js = f"""
-    new Chart(document.getElementById('monthlyChart'), {{
-        type: 'bar',
-        data: {{
-            labels: {month_labels_json},
-            datasets: [{{ label: 'Monthly Spend', data: {monthly_values}, backgroundColor: '#4e79a7', borderRadius: 6 }}]
-        }},
-        options: {{
-            responsive: true,
-            plugins: {{ legend: {{ display: false }}, tooltip: {{ callbacks: {{ label: ctx => '$' + ctx.parsed.y.toLocaleString(undefined, {{minimumFractionDigits:2}}) }} }} }},
-            scales: {{ y: {{ beginAtZero: true, ticks: {{ callback: v => '$' + (v/1000).toFixed(0) + 'k' }} }} }}
-        }}
-    }});"""
 
-    # ── Chart.js for fixed/discretionary pie ──
+    # ── Chart.js for fixed/discretionary stacked bar ──
     fixed_chart_js = ""
     if fixed_detail:
         fixed_chart_js = f"""
-    new Chart(document.getElementById('fixedChart'), {{
-        type: 'doughnut',
+    new Chart(document.getElementById('fixedDiscChart'), {{
+        type: 'bar',
         data: {{
-            labels: ['Fixed Costs', 'Discretionary'],
-            datasets: [{{ data: [{fixed_total}, {discretionary_total}], backgroundColor: ['#4e79a7', '#76b7b2'], borderWidth: 2, borderColor: '#fff' }}]
+            labels: {fixed_disc_labels},
+            datasets: [
+                {{ label: 'Fixed', data: {fixed_per_month_json}, backgroundColor: '#4e79a7', borderRadius: 4 }},
+                {{ label: 'Discretionary', data: {disc_per_month_json}, backgroundColor: '#76b7b2', borderRadius: 4 }}
+            ]
         }},
         options: {{
             responsive: true,
             plugins: {{
                 legend: {{ position: 'bottom' }},
-                tooltip: {{ callbacks: {{ label: ctx => ctx.label + ': $' + ctx.parsed.toLocaleString(undefined, {{minimumFractionDigits:2}}) }} }}
+                tooltip: {{ callbacks: {{ label: ctx => ctx.dataset.label + ': $' + ctx.parsed.y.toLocaleString(undefined, {{minimumFractionDigits:2}}) }} }}
+            }},
+            scales: {{
+                x: {{ stacked: true }},
+                y: {{ stacked: true, beginAtZero: true, ticks: {{ callback: v => '$' + (v/1000).toFixed(0) + 'k' }} }}
             }}
         }}
     }});"""
@@ -2646,31 +2959,30 @@ canvas {{ max-width: 100%; }}
 </div>
 
 <!-- ═══ INCOME ═══ -->
-{'<div class="tab-panel" id="tab-income">' + income_chart_section + corporate_section + passive_section + '</div>' if (corporate_income or passive_income) else ''}
+{'<div class="tab-panel" id="tab-income">' + income_chart_section + corporate_section + passive_section + etransfer_income_section + bank_interest_section + '</div>' if (corporate_income or passive_income or incoming_etransfers or bank_interest) else ''}
 
 <!-- ═══ SPENDING ANALYSIS ═══ -->
 <div class="tab-panel" id="tab-spending">
-<div id="charts" class="chart-row">
-    <div class="card">
-        <h2>Monthly Spending{' (Credit + Debit)' if has_debit else ''}</h2>
-        <div class="chart-container"><canvas id="monthlyChart"></canvas></div>
-    </div>
-    <div class="card">
-        <h2>Category Breakdown</h2>
-        <div class="chart-container"><canvas id="categoryChart"></canvas></div>
-    </div>
+
+{spotlight_html}
+
+<div class="card" style="margin-bottom:20px">
+    <h2>Monthly Spending{' (Credit + Debit)' if has_debit else ''}</h2>
+    <div class="chart-container"><canvas id="monthlyChart"></canvas></div>
 </div>
 
-{fixed_section}
-
 <section id="categories" class="card">
-    <h2>Category Breakdown</h2>
+    <h2>Category Heatmap</h2>
+    <p style="color:var(--muted);margin-bottom:15px">Spending intensity by category over the last 6 months. Darker cells = higher relative spend.</p>
+    <div style="overflow-x:auto">
     <table class="data-table">
-        <thead><tr><th>Category</th><th style="text-align:right">Total</th><th style="text-align:right">Monthly Avg</th>{'<th>vs Budget</th>' if has_budgets else ''}<th style="text-align:center">Trend</th><th style="text-align:center">Txns</th></tr></thead>
-        <tbody>{cat_rows}</tbody>
-        <tfoot><tr style="font-weight:700"><td>Total</td><td style="text-align:right">{money(data['total'])}</td><td style="text-align:right">{money(data['monthly_avg'])}</td>{'<td></td>' if has_budgets else ''}<td></td><td></td></tr></tfoot>
+        <thead><tr><th>Category</th>{heatmap_month_headers}<th style="text-align:right">Avg</th></tr></thead>
+        <tbody>{heatmap_rows}</tbody>
     </table>
+    </div>
 </section>
+
+{fixed_section}
 
 <section id="subscriptions" class="card">
     <h2>Subscription Audit</h2>
@@ -2723,27 +3035,6 @@ document.addEventListener('DOMContentLoaded', function() {{
 
     // Monthly spending bar chart
     {monthly_chart_js}
-
-    // Category donut chart
-    new Chart(document.getElementById('categoryChart'), {{
-        type: 'doughnut',
-        data: {{
-            labels: {cat_labels},
-            datasets: [{{
-                data: {cat_values},
-                backgroundColor: {cat_colors},
-                borderWidth: 2,
-                borderColor: '#fff',
-            }}]
-        }},
-        options: {{
-            responsive: true,
-            plugins: {{
-                legend: {{ position: 'right', labels: {{ font: {{ size: 11 }}, boxWidth: 12 }} }},
-                tooltip: {{ callbacks: {{ label: ctx => ctx.label + ': $' + ctx.parsed.toLocaleString(undefined, {{minimumFractionDigits:2}}) }} }}
-            }}
-        }}
-    }});
 
     {fixed_chart_js}
 
@@ -2805,9 +3096,17 @@ def main():
                 print(f"Applied {count} e-transfer category overrides")
 
     # Extract transfer data from debit card CSVs
-    transfers = extract_transfers(folder)
+    transfers, incoming_etransfers = extract_transfers(folder)
     if transfers:
         print(f"Found transfer data across {len(transfers)} months")
+    if incoming_etransfers:
+        print(f"Found {len(incoming_etransfers)} incoming e-transfers")
+
+    # Extract bank interest from personal + corporate debit CSVs
+    bank_interest = extract_bank_interest(folder)
+    if bank_interest:
+        bi_total = sum(t["amount"] for t in bank_interest)
+        print(f"Found {len(bank_interest)} bank interest payments totalling ${bi_total:,.2f}")
 
     # Extract passive income from investment portfolio
     passive_income = extract_passive_income(folder, source=args.source)
@@ -2829,11 +3128,15 @@ def main():
     ai_html = None
     if args.ai:
         ai_html = get_ai_recommendations(data, passive_income=passive_income,
-                                          corporate_income=corporate_income)
+                                          corporate_income=corporate_income,
+                                          incoming_etransfers=incoming_etransfers,
+                                          bank_interest=bank_interest)
 
     html = generate_html(data, ai_html, notes=user_notes, budgets=user_budgets,
                          passive_income=passive_income,
                          corporate_income=corporate_income,
+                         incoming_etransfers=incoming_etransfers,
+                         bank_interest=bank_interest,
                          folder=folder)
     output_path = os.path.join(folder, "dashboard.html")
     with open(output_path, "w", encoding="utf-8") as f:
