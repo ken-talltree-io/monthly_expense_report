@@ -1135,17 +1135,23 @@ def extract_passive_income(folder: str) -> dict | None:
                     except ValueError:
                         continue
 
-            # Return %: prefer statement, fall back to CSV
-            if stmt and stmt.get("return_pct") is not None:
+            # Return %: portfolio.csv overrides, then statement, then 0
+            rate_str = row[col_return].strip().replace("%", "") if col_return is not None and col_return < len(row) else ""
+            csv_return = None
+            if rate_str and rate_str != "TBD":
+                try:
+                    csv_return = float(rate_str)
+                except (ValueError, TypeError):
+                    pass
+            if csv_return is not None:
+                return_pct = csv_return
+                return_source = "portfolio.csv"
+            elif stmt and stmt.get("return_pct") is not None:
                 return_pct = stmt["return_pct"]
                 return_source = stmt["source"]
             else:
-                rate_str = row[col_return].strip().replace("%", "") if col_return is not None and col_return < len(row) else ""
-                try:
-                    return_pct = float(rate_str)
-                except (ValueError, TypeError):
-                    return_pct = 0.0
-                return_source = "portfolio.csv"
+                return_pct = 0.0
+                return_source = ""
 
             # Yield: prefer statement dividends, else estimate from return × balance
             if stmt and stmt.get("dividends_annual") is not None:
