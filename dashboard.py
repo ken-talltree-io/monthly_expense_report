@@ -1863,14 +1863,40 @@ def get_ai_recommendations(data: dict, passive_income: dict | None = None,
     # Debts already paid off during this period (no longer owed)
     debt_payoffs = data.get("debt_payoffs", [])
     if debt_payoffs:
+        from collections import defaultdict as _dd2
+        _payoff_by_merchant = _dd2(lambda: {"total": 0.0, "last_date": None})
+        for d in debt_payoffs:
+            _payoff_by_merchant[d["merchant"]]["total"] += d["amount"]
+            dt = d["date"]
+            prev = _payoff_by_merchant[d["merchant"]]["last_date"]
+            if prev is None or dt > prev:
+                _payoff_by_merchant[d["merchant"]]["last_date"] = dt
         summary["debts_paid_off"] = {
             "total_eliminated": round(sum(d["amount"] for d in debt_payoffs), 2),
+            "debts": [
+                {"merchant": m, "principal": round(info["total"], 2), "paid_off": str(info["last_date"])}
+                for m, info in _payoff_by_merchant.items()
+            ],
             "note": "These debts have already been fully paid off during this period. They are NOT outstanding balances.",
         }
 
+    # Corporate milestones
+    if corporate_income:
+        milestones = {}
+        if corporate_income.get("earliest_txn_date"):
+            milestones["launch_date"] = str(corporate_income["earliest_txn_date"])
+        if corporate_income.get("first_revenue"):
+            fr = corporate_income["first_revenue"]
+            milestones["first_revenue"] = {"date": str(fr["date"]), "amount": fr["amount"]}
+        if corporate_income.get("first_dividend"):
+            fd = corporate_income["first_dividend"]
+            milestones["first_dividend"] = {"date": str(fd["date"]), "amount": fd["amount"]}
+        if milestones:
+            summary.setdefault("corporate_income", {})["milestones"] = milestones
+
     prompt = f"""Analyze this personal & corporate financial dashboard and provide actionable recommendations.
 
-Context: This dashboard covers a self-employed consultant pursuing financial sustainability, defined as: passive income >= burn rate. Income comes from three streams: (1) passive portfolio yield from personal investments — this is the SUSTAINABLE income, (2) corporate consulting revenue (Tall Tree Technology) at ~60% take-home after tax/expenses — this is ACTIVE income that bridges the gap, and (3) corporate dividend income (Britton Holdings). The "burn_rate_coverage" section shows how much of the burn rate is covered by passive income alone — coverage_pct is passive-only. Corporate income bridges the remaining gap but is not considered sustainable. "accessible_savings" is the total balance in Non-registered, Cash, and TFSA accounts that can be drawn without tax penalty; "runway_months" shows how long savings last if all income stopped (null if passive income already covers expenses). Revenue trend shows month-over-month changes in consulting income. "debts_paid_off" lists debts that were fully eliminated during this period — these are no longer owed and should be celebrated, not treated as outstanding obligations. The spending data includes fixed costs (tuition, car payment, utilities) and discretionary spending across credit and debit cards. The "passive_income.accounts" array contains per-account detail (name, type, balance, annual_yield, return_pct) for accessible accounts and RRSP accounts — use this to identify underperforming or overconcentrated positions. The "passive_income.net_worth" object shows the full balance breakdown across accessible, RRSP, corporate, property, and RESP holdings. Each category includes a "monthly" object with per-month spending for the last 6 months — use this to spot categories trending up or down.
+Context: This dashboard covers a self-employed consultant pursuing financial sustainability, defined as: passive income >= burn rate. Income comes from three streams: (1) passive portfolio yield from personal investments — this is the SUSTAINABLE income, (2) corporate consulting revenue (Tall Tree Technology) at ~60% take-home after tax/expenses — this is ACTIVE income that bridges the gap, and (3) corporate dividend income (Britton Holdings). The "burn_rate_coverage" section shows how much of the burn rate is covered by passive income alone — coverage_pct is passive-only. Corporate income bridges the remaining gap but is not considered sustainable. "accessible_savings" is the total balance in Non-registered, Cash, and TFSA accounts that can be drawn without tax penalty; "runway_months" shows how long savings last if all income stopped (null if passive income already covers expenses). Revenue trend shows month-over-month changes in consulting income. "debts_paid_off" lists debts that were fully eliminated during this period (with per-debt principal and payoff dates) — these are no longer owed and should be celebrated, not treated as outstanding obligations. "corporate_income.milestones" shows the corporate journey timeline (launch date, first revenue, first dividend). The spending data includes fixed costs (tuition, car payment, utilities) and discretionary spending across credit and debit cards. The "passive_income.accounts" array contains per-account detail (name, type, balance, annual_yield, return_pct) for accessible accounts and RRSP accounts — use this to identify underperforming or overconcentrated positions. The "passive_income.net_worth" object shows the full balance breakdown across accessible, RRSP, corporate, property, and RESP holdings. Each category includes a "monthly" object with per-month spending for the last 6 months — use this to spot categories trending up or down.
 
 DATA:
 {json.dumps(summary, indent=2)}
@@ -2720,17 +2746,29 @@ def generate_html(data: dict, ai_html: str | None = None,
 
     milestones_section = ""
     if timeline_events:
-        timeline_rows = ""
+        # Group events by quarter
+        from collections import OrderedDict
+        quarters = OrderedDict()
         for date_val, icon, title, detail, color in timeline_events:
-            if hasattr(date_val, 'strftime'):
-                date_str = date_val.strftime("%b %d, %Y")
-            else:
-                date_str = str(date_val)
+            d = _to_date(date_val)
+            h = 1 if d.month <= 6 else 2
+            h_key = (d.year, h)
+            quarters.setdefault(h_key, []).append((date_val, icon, title, detail, color))
+
+        timeline_rows = ""
+        for (year, h), events in quarters.items():
+            q_label = f"H{h} {year}"
             timeline_rows += f"""
             <tr>
-                <td style="white-space:nowrap;color:var(--muted);font-size:0.9em;padding:14px 20px 14px 16px;vertical-align:top">{date_str}</td>
-                <td style="font-size:1.3em;padding:14px 12px;vertical-align:top;text-align:center">{icon}</td>
-                <td style="padding:14px 16px 14px 8px">
+                <td colspan="3" style="padding:20px 16px 8px;font-weight:700;font-size:0.95em;color:var(--accent);border-bottom:2px solid var(--accent);letter-spacing:0.3px">{q_label}</td>
+            </tr>"""
+            for date_val, icon, title, detail, color in events:
+                date_str = date_val.strftime("%b %d") if hasattr(date_val, 'strftime') else str(date_val)
+                timeline_rows += f"""
+            <tr>
+                <td style="white-space:nowrap;color:var(--muted);font-size:0.9em;padding:12px 20px 12px 28px;vertical-align:top">{date_str}</td>
+                <td style="font-size:1.3em;padding:12px 12px;vertical-align:top;text-align:center">{icon}</td>
+                <td style="padding:12px 16px 12px 8px">
                     <div style="font-weight:600;color:{color};font-size:1.0em">{title}</div>
                     <div style="color:var(--muted);font-size:0.88em;margin-top:2px">{detail}</div>
                 </td>
