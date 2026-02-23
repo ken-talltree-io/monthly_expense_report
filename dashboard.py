@@ -329,15 +329,13 @@ CATEGORY_RULES = [
         "Havana Restaurant", "Angus T", "La Baguette",
         "The Flying Apron", "Hot Chocolates", "Chance Cafe",
     ]),
-    ("Coffee Shops", [
+    ("Cafes & Treats", [
         "Continental Coffee", "JJ Bean", "Prado Cafe", "Forecast Coffee",
         "Moja Coffee", "Starbucks", "Nemesis Coffee", "Kits Beach Coffee",
         "Bean Scene", "White Rabbit Coffee", "Bolacco", "Crema Cafe",
         "Parsonage Cafe",
         "Breka Bakery", "Deville Coffee", "Bean Around", "Bump N Grind",
         "Grounds For Coffee", "Matchstick", "Laughing Bean",
-    ]),
-    ("Bakeries & Treats", [
         "Cobs Bread", "Purebread", "Livia Sweets", "To Live For Bakery",
         "The First Ravioli", "Oh Sweet Day", "Earnest Ice Cream",
         "The Bench Bakehouse", "Uprising Breads", "Terra Breads",
@@ -365,6 +363,8 @@ CATEGORY_RULES = [
         "Netflix", "Disney+", "Bell Media", "Sportsnet NOW", "MUBI",
         "Apple Subscriptions", "Amazon Prime", "Open Heart Project",
         "Brief Media", "Stratechery",
+        "OpenAI", "Cursor IDE", "Frontend Masters", "Resume.io",
+        "Claude AI", "Nvidia",
     ]),
     ("Pets", [
         "MrPets", "Pet Valu", "Pet Pantry", "Caulfeild Vet",
@@ -375,11 +375,13 @@ CATEGORY_RULES = [
         "Harbour Air", "Expedia",
         "Modo Car Share",
     ]),
-    ("Parking & Gas", [
+    ("Auto", [
         "PayByPhone", "Impark", "Honk Parking", "Petro-Canada",
         "Chevron", "Nwest Parking", "New West Parking", "Zipby",
         "False Creek Parking", "Silver Creek Travel",
         "Shell EV Charging", "ChargePoint EV", "On The Run EV",
+        "KAL Tire", "Shine Auto Wash", "Air-Serv", "Tesla", "Sony Wash",
+        "Hyundai Car Payment", "North Shore Kia",
     ]),
     ("Clothing", [
         "Ardene", "Old Navy", "Uniqlo", "Simons", "Lululemon", "Vessi",
@@ -392,8 +394,6 @@ CATEGORY_RULES = [
     ("Sports & Outdoor", [
         "MEC", "Sport Chek", "Decathlon", "Sports Junkies", "Canucks",
         "Long & McQuade", "Drive Drum",
-    ]),
-    ("Ski Resorts", [
         "Sun Peaks", "Mt Seymour", "Big White",
         "Mount Washington", "Revelstoke Mountain",
     ]),
@@ -404,7 +404,7 @@ CATEGORY_RULES = [
         "IKEA", "HomeSense", "Coast Goods", "Second Nature Home",
         "Rainflorist",
     ]),
-    ("Health & Beauty", [
+    ("Health & Wellness", [
         "London Drugs", "Shoppers Drug Mart", "Rexall", "New Visage",
         "Harlow Skin", "Body Energy", "Spice Beauty", "Paulie",
         "Caulfeild Pharmasave", "Hemlock Hospital",
@@ -413,14 +413,8 @@ CATEGORY_RULES = [
         "Swank's Salon", "Dr. Marina Liarsky", "Grant Street Wellness",
         "Modo Yoga", "The Drive Pharmacy", "Generations Optometry",
         "Kokopelli Salon",
-    ]),
-    ("Dental", [
         "Yaletown Dentistry", "Cambie Broadway Dental", "Tot 2 Teen Dental",
         "Dr. Liat Tzur", "Sunrise Orthodontics",
-    ]),
-    ("Software & SaaS", [
-        "OpenAI", "Cursor IDE", "Frontend Masters", "Resume.io",
-        "Claude AI", "Nvidia",
     ]),
     ("Insurance", [
         "ICBC", "BCAA Insurance", "Wawanesa", "RBC Life Insurance", "Sun Life Insurance",
@@ -436,16 +430,11 @@ CATEGORY_RULES = [
         "BC Place", "Rio Theatre", "Steam Games", "Pulp Fiction Books",
         "Vancouver Parks Board",
     ]),
-    ("Amazon", [
+    ("Online Shopping", [
         "Amazon",
     ]),
     ("Kids", [
         "Dilly Dally Kids",
-    ]),
-    ("Auto", [
-        "KAL Tire", "Shine Auto Wash", "Air-Serv", "Tesla", "Sony Wash",
-        "Hyundai Car Payment",
-        "North Shore Kia",
     ]),
     ("Travel & Hotels", [
         "Best Western", "Nomade Cabo", "Merpago", "Clip Mx",
@@ -464,8 +453,6 @@ CATEGORY_RULES = [
     ("Utilities", [
         "FortisBC", "BC Hydro",
     ]),
-    ("Medical", [
-    ]),
     ("Housing", [
         "Mortgage", "Vancouver Property Taxes",
     ]),
@@ -478,29 +465,23 @@ CATEGORY_CONSOLIDATION = {
     "Education": "Kids & Education",
     "Kids": "Kids & Education",
     "Restaurants & Dining": "Food & Dining",
-    "Coffee Shops": "Food & Dining",
-    "Bakeries & Treats": "Food & Dining",
+    "Cafes & Treats": "Food & Dining",
     "Groceries": "Food & Dining",
     "Liquor & Alcohol": "Food & Dining",
     "Home Improvement": "Housing & Utilities",
     "Housing": "Housing & Utilities",
     "Utilities": "Housing & Utilities",
     "Transportation": "Transportation",
-    "Auto": "Transportation",
-    "Parking & Gas": "Transportation",
-    "Health & Beauty": "Health & Wellness",
-    "Dental": "Health & Wellness",
-    "Medical": "Health & Wellness",
+    "Auto": "Auto",
+    "Health & Wellness": "Health & Wellness",
     "Entertainment": "Recreation",
     "Sports & Outdoor": "Recreation",
-    "Ski Resorts": "Recreation",
     "Travel & Hotels": "Travel",
     "Clothing": "Shopping",
-    "Amazon": "Shopping",
+    "Online Shopping": "Shopping",
     "Insurance": "Insurance",
     "Streaming & Subscriptions": "Subscriptions & Telecom",
     "Telecom": "Subscriptions & Telecom",
-    "Software & SaaS": "Subscriptions & Telecom",
     "Pets": "Pets",
     "Donations": "Donations",
 }
@@ -2818,7 +2799,7 @@ def main():
                 if t["merchant"] == "Interac e-Transfer":
                     key = (str(t["date"])[:10], f'{t["amount"]:.2f}')
                     if key in override_map:
-                        t["category"] = override_map[key]
+                        t["category"] = CATEGORY_CONSOLIDATION.get(override_map[key], override_map[key])
                         count += 1
             if count:
                 print(f"Applied {count} e-transfer category overrides")
