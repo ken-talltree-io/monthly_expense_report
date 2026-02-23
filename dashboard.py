@@ -2030,7 +2030,8 @@ def generate_html(data: dict, ai_html: str | None = None,
     if os.path.exists(notes_path):
         with open(notes_path, newline="") as f:
             for row in csv.DictReader(f):
-                key = (row["date"], row["amount"])
+                amt = row["amount"].replace("$", "").replace(",", "")
+                key = (row["date"], amt)
                 if row.get("note", "").strip():
                     etransfer_notes[key] = row["note"].strip()
     etransfer_by_month = {}
@@ -2800,6 +2801,27 @@ def main():
 
     transactions, debt_payoffs = parse_csvs(folder)
     print(f"Loaded {len(transactions)} transactions")
+
+    # Apply category overrides from etransfer-notes.csv
+    etransfer_notes_path = os.path.join(folder, "etransfer-notes.csv")
+    if os.path.exists(etransfer_notes_path):
+        override_map = {}
+        with open(etransfer_notes_path, newline="") as f:
+            for row in csv.DictReader(f):
+                cat = row.get("category", "").strip()
+                if cat:
+                    amt = row["amount"].replace("$", "").replace(",", "")
+                    override_map[(row["date"], amt)] = cat
+        if override_map:
+            count = 0
+            for t in transactions:
+                if t["merchant"] == "Interac e-Transfer":
+                    key = (str(t["date"])[:10], f'{t["amount"]:.2f}')
+                    if key in override_map:
+                        t["category"] = override_map[key]
+                        count += 1
+            if count:
+                print(f"Applied {count} e-transfer category overrides")
 
     # Extract transfer data from debit card CSVs
     transfers = extract_transfers(folder)
