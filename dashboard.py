@@ -1971,25 +1971,7 @@ def generate_html(data: dict, ai_html: str | None = None,
                 f'</div>')
 
     # ── Data preparation ──
-    monthly_values = json.dumps([data["monthly_totals"][m] for m in months])
-    month_labels_json = json.dumps(month_labels)
-
-    # Source breakdown for stacked bar chart
     source_breakdown = data.get("source_breakdown", {})
-    credit_monthly = json.dumps([source_breakdown.get("credit", {}).get(m, 0) for m in months])
-    debit_monthly = json.dumps([source_breakdown.get("debit", {}).get(m, 0) for m in months])
-    has_debit = "debit" in source_breakdown
-
-    # 3-month rolling average for monthly spending chart
-    monthly_vals_raw = [data["monthly_totals"].get(m, 0) for m in months]
-    rolling_avg = []
-    for i in range(len(monthly_vals_raw)):
-        if i < 2:
-            rolling_avg.append(None)  # Not enough data for 3-month average
-        else:
-            avg = sum(monthly_vals_raw[i-2:i+1]) / 3
-            rolling_avg.append(round(avg, 2))
-    rolling_avg_json = json.dumps(rolling_avg)
 
     # Fixed costs data
     fixed_detail = data.get("fixed_cost_detail", [])
@@ -2136,8 +2118,10 @@ def generate_html(data: dict, ai_html: str | None = None,
             text_color = "#fff" if intensity > 0.5 else "var(--text)"
             cell_text = money(val) if val > 0 else '<span style="color:#ccc">\u2014</span>'
             cells += f"<td style='text-align:right;background:{bg};color:{text_color}'>{cell_text}</td>"
+        cat_total = sum(monthly_vals)
+        total_cell = f"<td style='text-align:right;font-weight:600'>{money(cat_total)}</td>"
         avg_cell = f"<td style='text-align:right;font-weight:600'>{money(cat_avg)}</td>"
-        heatmap_rows += f"<tr><td>{c}</td>{cells}{avg_cell}</tr>"
+        heatmap_rows += f"<tr><td>{c}</td>{cells}{total_cell}{avg_cell}</tr>"
 
     # ── Monthly Spotlight data prep ──
     current_month = datetime.now().strftime("%Y-%m")
@@ -2827,36 +2811,6 @@ def generate_html(data: dict, ai_html: str | None = None,
     if ai_html:
         ai_tab_btn = '<button data-tab="tab-ai">AI Recommendations</button>'
 
-    # ── Chart.js for stacked monthly bar + rolling average line ──
-    if has_debit:
-        bar_datasets = f"""
-                {{ label: 'Credit Card', data: {credit_monthly}, backgroundColor: '#4e79a7', borderRadius: 4, order: 2 }},
-                {{ label: 'Debit Card', data: {debit_monthly}, backgroundColor: '#76b7b2', borderRadius: 4, order: 2 }},"""
-    else:
-        bar_datasets = f"""
-                {{ label: 'Monthly Spend', data: {monthly_values}, backgroundColor: '#4e79a7', borderRadius: 6, order: 2 }},"""
-
-    monthly_chart_js = f"""
-    new Chart(document.getElementById('monthlyChart'), {{
-        type: 'bar',
-        data: {{
-            labels: {month_labels_json},
-            datasets: [{bar_datasets}
-                {{ label: '3-Mo Avg', data: {rolling_avg_json}, type: 'line', borderColor: '#e15759', borderWidth: 2, borderDash: [6, 3], pointRadius: 0, fill: false, order: 1, spanGaps: true }}
-            ]
-        }},
-        options: {{
-            responsive: true,
-            plugins: {{
-                tooltip: {{ callbacks: {{ label: ctx => ctx.dataset.label + ': $' + ctx.parsed.y.toLocaleString(undefined, {{minimumFractionDigits:2}}) }} }}
-            }},
-            scales: {{
-                x: {{ stacked: true }},
-                y: {{ stacked: true, beginAtZero: true, ticks: {{ callback: v => '$' + (v/1000).toFixed(0) + 'k' }} }}
-            }}
-        }}
-    }});"""
-
     # ── Chart.js for fixed/discretionary stacked bar ──
     fixed_chart_js = ""
     if fixed_detail:
@@ -2966,17 +2920,12 @@ canvas {{ max-width: 100%; }}
 
 {spotlight_html}
 
-<div class="card" style="margin-bottom:20px">
-    <h2>Monthly Spending{' (Credit + Debit)' if has_debit else ''}</h2>
-    <div class="chart-container"><canvas id="monthlyChart"></canvas></div>
-</div>
-
 <section id="categories" class="card">
     <h2>Category Heatmap</h2>
     <p style="color:var(--muted);margin-bottom:15px">Spending intensity by category over the last 6 months. Darker cells = higher relative spend.</p>
     <div style="overflow-x:auto">
     <table class="data-table">
-        <thead><tr><th>Category</th>{heatmap_month_headers}<th style="text-align:right">Avg</th></tr></thead>
+        <thead><tr><th>Category</th>{heatmap_month_headers}<th style="text-align:right">6m Total</th><th style="text-align:right">Avg</th></tr></thead>
         <tbody>{heatmap_rows}</tbody>
     </table>
     </div>
@@ -3032,9 +2981,6 @@ document.addEventListener('DOMContentLoaded', function() {{
 <script>
 document.addEventListener('DOMContentLoaded', function() {{
     if (typeof Chart === 'undefined') return;
-
-    // Monthly spending bar chart
-    {monthly_chart_js}
 
     {fixed_chart_js}
 
