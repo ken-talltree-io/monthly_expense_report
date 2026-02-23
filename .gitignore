@@ -5,9 +5,7 @@ run-dashboard.sh
 # Generated output
 dashboard.html
 
-# Financial data (PII) — statements, transactions, investments
+# Financial data (PII) — statements, transactions
 *.pdf
-credit card/
-debit card/
-corporate/
-investments/
+statements/
+transactions/

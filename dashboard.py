@@ -15,7 +15,9 @@ import csv
 import glob
 import json
 import os
+import re
 import ssl
+import subprocess
 import sys
 from collections import defaultdict
 from datetime import datetime
@@ -580,17 +582,22 @@ def parse_csvs(folder: str) -> list[dict]:
     """Read credit card and debit card CSVs, return unified transaction list."""
     transactions = []
 
-    # Collect CSV files from subdirectories
+    # Collect CSV files from transactions/personal/
     all_files = []
-    for subdir in ["credit card", "debit card"]:
-        subpath = os.path.join(folder, subdir)
-        if os.path.isdir(subpath):
-            all_files.extend(sorted(glob.glob(os.path.join(subpath, "*.csv"))))
-            all_files.extend(sorted(glob.glob(os.path.join(subpath, "*", "*.csv"))))
-    # Backward compat: check root folder for credit-card-*.csv
-    root_csvs = sorted(glob.glob(os.path.join(folder, "credit-card-*.csv")))
-    if root_csvs:
-        all_files.extend(root_csvs)
+    txn_personal = os.path.join(folder, "transactions", "personal")
+    if os.path.isdir(txn_personal):
+        all_files.extend(sorted(glob.glob(os.path.join(txn_personal, "**", "*.csv"), recursive=True)))
+    # Backward compat: check old directory structure
+    if not all_files:
+        for subdir in ["credit card", "debit card"]:
+            subpath = os.path.join(folder, subdir)
+            if os.path.isdir(subpath):
+                all_files.extend(sorted(glob.glob(os.path.join(subpath, "*.csv"))))
+                all_files.extend(sorted(glob.glob(os.path.join(subpath, "*", "*.csv"))))
+    if not all_files:
+        root_csvs = sorted(glob.glob(os.path.join(folder, "credit-card-*.csv")))
+        if root_csvs:
+            all_files.extend(root_csvs)
     if not all_files:
         skip = {"categories", "notes", "budgets"}
         all_files = sorted(f for f in glob.glob(os.path.join(folder, "*.csv"))
@@ -641,7 +648,10 @@ def parse_csvs(folder: str) -> list[dict]:
                 debit_count += 1
                 for row in reader:
                     txn_type = row["transaction"]
-                    amount = float(row["amount"])
+                    amt_str = row["amount"].strip()
+                    if not amt_str:
+                        continue
+                    amount = float(amt_str)
                     description = row["description"]
 
                     if txn_type == "SPEND":
@@ -725,60 +735,326 @@ def parse_csvs(folder: str) -> list[dict]:
     return sorted(transactions, key=lambda t: t["date"]), debt_payoffs
 
 
+# ── Statement Balance Parsing ────────────────────────────────────────────────
+
+def parse_statement_balances(folder: str) -> dict[str, dict]:
+    """Parse statement PDFs to get authoritative account balances.
+
+    Scans statements/ for Wealthsimple, Steadyhand, and Scotiabank PDFs.
+    Returns a dict keyed by account suffix with:
+        {"balance": float, "date": str, "source": str}
+    For each suffix, keeps only the most recent statement.
+    """
+    stmt_dir = os.path.join(folder, "statements")
+    if not os.path.isdir(stmt_dir):
+        return {}
+
+    # Quick check that pdftotext is available
+    try:
+        subprocess.run(["pdftotext", "-v"], capture_output=True, timeout=5)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return {}
+
+    results: dict[str, dict] = {}  # suffix -> {balance, date, source, return_pct, dividends_annual}
+
+    def _pdf_text(path: str) -> str:
+        """Extract text from a PDF using pdftotext -layout."""
+        try:
+            r = subprocess.run(
+                ["pdftotext", "-layout", path, "-"],
+                capture_output=True, text=True, timeout=30,
+            )
+            return r.stdout if r.returncode == 0 else ""
+        except (subprocess.TimeoutExpired, OSError):
+            return ""
+
+    # ── Wealthsimple (individual PDFs per account) ──────────────────────────
+    # Scan both personal and corporate Wealthsimple statement directories
+    ws_pdfs: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for ownership in ["personal", "corporate"]:
+        ws_dir = os.path.join(stmt_dir, ownership, "Wealthsimple")
+        if not os.path.isdir(ws_dir):
+            continue
+        for fname in os.listdir(ws_dir):
+            if not fname.lower().endswith(".pdf"):
+                continue
+            if "_CRM2_" in fname:
+                continue  # CRM2 reports handled separately
+            parts = fname.split("_")
+            if len(parts) < 3:
+                continue
+            suffix = parts[0]
+            # Extract YYYY-MM from filename (3rd segment)
+            date_seg = parts[2] if len(parts) > 2 else ""
+            ws_pdfs[suffix].append((date_seg, os.path.join(ws_dir, fname)))
+
+    for suffix, files in ws_pdfs.items():
+        # Use the most recent statement for balance
+        files.sort(key=lambda x: x[0], reverse=True)
+        date_seg, pdf_path = files[0]
+
+        text = _pdf_text(pdf_path)
+        if not text:
+            continue
+
+        # Parse balance: "Total Portfolio" followed by $amount and 100.00
+        m = re.search(
+            r"Total Portfolio\s+\$([0-9,]+\.\d{2})\s+100\.00", text
+        )
+        if not m:
+            continue
+        balance = float(m.group(1).replace(",", ""))
+
+        # Handle USD accounts: convert to CAD using statement exchange rate
+        is_usd = suffix.upper().endswith("USD")
+        if is_usd:
+            fx = re.search(
+                r"\$1 USD = \$([0-9.]+) CAD", text
+            )
+            if fx:
+                balance = round(balance * float(fx.group(1)), 2)
+            else:
+                # Check other Wealthsimple PDFs for an exchange rate
+                for other_suffix, other_files in ws_pdfs.items():
+                    if other_suffix == suffix:
+                        continue
+                    other_text = _pdf_text(other_files[0][1])
+                    fx = re.search(r"\$1 USD = \$([0-9.]+) CAD", other_text)
+                    if fx:
+                        balance = round(balance * float(fx.group(1)), 2)
+                        break
+                else:
+                    continue  # Can't convert; skip this account
+
+        # Parse statement end date
+        dm = re.search(
+            r"(\d{4}-\d{2}-\d{2})\s*-\s*(\d{4}-\d{2}-\d{2})", text
+        )
+        stmt_date = dm.group(2) if dm else date_seg
+
+        results[suffix] = {
+            "balance": balance,
+            "date": stmt_date,
+            "source": "Wealthsimple statement",
+            "return_pct": None,
+            "dividends_annual": None,
+        }
+
+        # Parse dividends + interest from ALL monthly statements for this account
+        total_income = 0.0
+        months_seen = set()
+        for ds, fp in files:
+            pdf_text = text if fp == pdf_path else _pdf_text(fp)
+            if not pdf_text:
+                continue
+            # Track unique months
+            months_seen.add(ds[:7] if len(ds) >= 7 else ds)
+            monthly_income = 0.0
+            div_m = re.search(r"Dividends\s+\$([\d,]+\.\d{2})", pdf_text)
+            int_m = re.search(r"Interest Earned\s+\$([\d,]+\.\d{2})", pdf_text)
+            if div_m:
+                monthly_income += float(div_m.group(1).replace(",", ""))
+            if int_m:
+                monthly_income += float(int_m.group(1).replace(",", ""))
+            total_income += monthly_income
+
+        if months_seen and total_income > 0:
+            results[suffix]["dividends_annual"] = round(
+                total_income / len(months_seen) * 12, 2
+            )
+
+    # ── Wealthsimple CRM2 performance reports ────────────────────────────
+    for ownership in ["personal", "corporate"]:
+        ws_dir = os.path.join(stmt_dir, ownership, "Wealthsimple")
+        if not os.path.isdir(ws_dir):
+            continue
+        for fname in os.listdir(ws_dir):
+            if "_CRM2_" not in fname or "_CRM2_FEE_" in fname:
+                continue
+            if not fname.lower().endswith(".pdf"):
+                continue
+            suffix = fname.split("_")[0]
+            crm2_text = _pdf_text(os.path.join(ws_dir, fname))
+            if not crm2_text:
+                continue
+            # "Since Account Opening" header on one line, percentages on next non-empty line
+            lines = crm2_text.split("\n")
+            for i, line in enumerate(lines):
+                if "Since Account Opening" in line:
+                    for j in range(i + 1, min(i + 5, len(lines))):
+                        pcts = re.findall(r"([\d.]+)%", lines[j])
+                        if pcts:
+                            val = float(pcts[-1])  # last column = Since Account Opening
+                            if suffix in results:
+                                results[suffix]["return_pct"] = val
+                            else:
+                                results[suffix] = {
+                                    "balance": 0, "date": "", "source": "CRM2 report",
+                                    "return_pct": val, "dividends_annual": None,
+                                }
+                            break
+                    break
+
+    # ── Steadyhand (consolidated quarterly PDFs) ────────────────────────────
+    sh_dir = os.path.join(stmt_dir, "personal", "Steadyhand")
+    if os.path.isdir(sh_dir):
+        # Find the most recent quarterly PDF by parsing month names
+        MONTH_ORDER = {
+            "january": 1, "february": 2, "march": 3, "april": 4,
+            "may": 5, "june": 6, "july": 7, "august": 8,
+            "september": 9, "october": 10, "november": 11, "december": 12,
+        }
+        sh_pdfs = []
+        for fname in os.listdir(sh_dir):
+            if not fname.lower().endswith(".pdf"):
+                continue
+            name = os.path.splitext(fname)[0]
+            parts = name.split()
+            if len(parts) == 2:
+                month_str, year_str = parts[0].lower(), parts[1]
+                if month_str in MONTH_ORDER:
+                    try:
+                        sort_key = int(year_str) * 100 + MONTH_ORDER[month_str]
+                        sh_pdfs.append((sort_key, os.path.join(sh_dir, fname)))
+                    except ValueError:
+                        pass
+
+        if sh_pdfs:
+            sh_pdfs.sort(reverse=True)
+            _, latest_pdf = sh_pdfs[0]
+            text = _pdf_text(latest_pdf)
+
+            if text:
+                # Parse "As of" date
+                date_m = re.search(r"As of (\w+ \d{1,2},?\s*\d{4})", text)
+                stmt_date = date_m.group(1) if date_m else ""
+
+                # Parse "Your Accounts" table: 7-digit account number + market value
+                for row_m in re.finditer(
+                    r"^(\d{7})\s+.+?\s+([\d,]+\.\d{2})\s*$",
+                    text, re.MULTILINE,
+                ):
+                    acct_num = row_m.group(1)
+                    balance = float(row_m.group(2).replace(",", ""))
+                    if balance <= 0:
+                        continue
+                    results[acct_num] = {
+                        "balance": balance,
+                        "date": stmt_date,
+                        "source": "Steadyhand statement",
+                        "return_pct": None,
+                        "dividends_annual": None,
+                    }
+
+                # Parse per-account since-inception returns (first match per account wins)
+                for acct_m in re.finditer(r"Account (\d{7})\s+\w", text):
+                    acct_num = acct_m.group(1)
+                    if acct_num not in results or results[acct_num]["return_pct"] is not None:
+                        continue
+                    si = re.search(r"Since Inception\s+([\d.]+)", text[acct_m.start():])
+                    if si:
+                        results[acct_num]["return_pct"] = float(si.group(1))
+
+    # ── Scotiabank Chequing (e-statement PDFs) ───────────────────────────
+    MONTH_NAMES = {
+        "january": 1, "february": 2, "march": 3, "april": 4,
+        "may": 5, "june": 6, "july": 7, "august": 8,
+        "september": 9, "october": 10, "november": 11, "december": 12,
+    }
+    for ownership in ["personal", "corporate"]:
+        sc_dir = os.path.join(stmt_dir, ownership, "Scotiabank Chequing")
+        if not os.path.isdir(sc_dir):
+            continue
+
+        # Collect PDFs and sort by date (most recent first)
+        sc_pdfs = []
+        for fname in os.listdir(sc_dir):
+            if not fname.lower().endswith(".pdf"):
+                continue
+            name = os.path.splitext(fname)[0]
+            # Personal: "February 2026 e-statement"
+            # Corporate: "Tall Tree Technology - DebitCard - January 2026 e-statement"
+            m = re.search(r"(\w+)\s+(\d{4})\s+e-statement", name, re.IGNORECASE)
+            if m:
+                month_str = m.group(1).lower()
+                year_str = m.group(2)
+                if month_str in MONTH_NAMES:
+                    sort_key = int(year_str) * 100 + MONTH_NAMES[month_str]
+                    sc_pdfs.append((sort_key, os.path.join(sc_dir, fname)))
+        if not sc_pdfs:
+            continue
+
+        sc_pdfs.sort(reverse=True)
+        _, latest_pdf = sc_pdfs[0]
+        text = _pdf_text(latest_pdf)
+        if not text:
+            continue
+
+        # Parse account number (Scotiabank format: XXXXX XXXXX XX)
+        acct_m = re.search(r"(\d{5})\s+(\d{5})\s+(\d{2})", text)
+        if not acct_m:
+            continue
+        acct_num = acct_m.group(1) + acct_m.group(2) + acct_m.group(3)
+
+        if ownership == "personal":
+            # Personal: "Closing Balance on February 17, 2026:  $2,382.71"
+            bal_m = re.search(
+                r"Closing Balance on (.+?)[\s:]+\$([0-9,]+\.\d{2})", text
+            )
+            if bal_m:
+                balance = float(bal_m.group(2).replace(",", ""))
+                stmt_date = bal_m.group(1).strip()
+                results[acct_num] = {
+                    "balance": balance,
+                    "date": stmt_date,
+                    "source": "Scotiabank statement",
+                    "return_pct": None,
+                    "dividends_annual": None,
+                }
+        else:
+            # Corporate: last balance from transaction lines
+            # Format: MM/DD/YYYY  DESCRIPTION  amount  amount  balance
+            last_balance = None
+            stmt_date = ""
+            # Parse statement end date from line with account number
+            # Format: "Business Account  40360 01202 19  Dec 31 2025  Jan 30 2026"
+            to_m = re.search(
+                r"(\d{5}\s+\d{5}\s+\d{2})\s+\w{3}\s+\d{1,2}\s+\d{4}\s+(\w{3}\s+\d{1,2}\s+\d{4})",
+                text,
+            )
+            if to_m:
+                stmt_date = to_m.group(2)
+            for line in text.split("\n"):
+                line = line.strip()
+                if re.match(r"\d{2}/\d{2}/\d{4}\s+", line):
+                    # Find rightmost dollar amount (the balance column)
+                    amounts = re.findall(r"([\d,]+\.\d{2})", line)
+                    if amounts:
+                        last_balance = float(amounts[-1].replace(",", ""))
+            if last_balance is not None:
+                results[acct_num] = {
+                    "balance": last_balance,
+                    "date": stmt_date,
+                    "source": "Scotiabank statement",
+                    "return_pct": None,
+                    "dividends_annual": None,
+                }
+
+    return results
+
+
 # ── Income & Transfer Extraction ─────────────────────────────────────────────
 
 def extract_passive_income(folder: str) -> dict | None:
     """Extract annual passive income from investment portfolio CSV.
 
-    Reads investments/*.csv and sums yield (annual income) for personal accounts.
+    Reads portfolio.csv and sums yield (annual income) for personal accounts.
     Excludes Corporate, RESP, and Property accounts.
     For accounts with TBD yield, estimates from return rate * total value.
     """
-    invest_dir = os.path.join(folder, "investments")
-    if not os.path.isdir(invest_dir):
-        return None
-
-    portfolio_path = os.path.join(invest_dir, "portfolio.csv")
+    portfolio_path = os.path.join(folder, "portfolio.csv")
     if not os.path.exists(portfolio_path):
-        # Fall back to any CSV in the investments directory
-        csv_files = sorted(glob.glob(os.path.join(invest_dir, "*.csv")))
-        if not csv_files:
-            return None
-        portfolio_path = csv_files[0]
-
-    # Build start-date lookup from Wealth CSV (if available but not the primary source)
-    # Key: (account_name_lower, brokerage_lower) for disambiguation
-    start_date_lookup = {}
-    wealth_csvs = glob.glob(os.path.join(invest_dir, "*Wealth*.csv"))
-    for wcsv in wealth_csvs:
-        if wcsv == portfolio_path:
-            continue  # skip if it's already the primary source
-        try:
-            with open(wcsv, newline="", encoding="utf-8-sig") as wf:
-                wreader = csv.reader(wf)
-                wheader = next(wreader)
-                wh = [c.strip().lower().replace("\n", " ") for c in wheader]
-                wsd_col = next((i for i, c in enumerate(wh) if "start date" in c), None)
-                if wsd_col is None:
-                    continue
-                for wrow in wreader:
-                    wname = wrow[0].strip().replace("\n", " ") if wrow else ""
-                    wbrokerage = wrow[1].strip().replace("\n", " ").lower() if len(wrow) > 1 else ""
-                    if not wname or wsd_col >= len(wrow):
-                        continue
-                    ds = wrow[wsd_col].strip()
-                    for fmt in ("%B %d, %Y", "%b %d, %Y", "%b %d %Y", "%Y-%m-%d"):
-                        try:
-                            parsed = datetime.strptime(ds, fmt).date()
-                            start_date_lookup[(wname.lower(), wbrokerage)] = parsed
-                            # Also store by name-only as fallback
-                            if wname.lower() not in start_date_lookup:
-                                start_date_lookup[wname.lower()] = parsed
-                            break
-                        except ValueError:
-                            continue
-        except Exception:
-            continue
+        return None
 
     ACCESSIBLE_TYPES = {"Non-reg", "Cash", "TFSA"}  # spendable without tax penalty
 
@@ -788,19 +1064,33 @@ def extract_passive_income(folder: str) -> dict | None:
     property_accts = []
     resp_accts = []
 
+    # Parse statement balances (authoritative source for totals)
+    stmt_balances = parse_statement_balances(folder)
+
+    # Build suffix → statement balance lookup (also match suffixes that are
+    # a trailing substring of the statement key, e.g. CSV "6905CAD" matches
+    # statement key "HQ8KF6905CAD")
+    def _find_stmt(csv_suffix: str) -> dict | None:
+        if not csv_suffix:
+            return None
+        if csv_suffix in stmt_balances:
+            return stmt_balances[csv_suffix]
+        for key, val in stmt_balances.items():
+            if key.endswith(csv_suffix):
+                return val
+        return None
+
     with open(portfolio_path, newline="", encoding="utf-8-sig") as f:
         reader = csv.reader(f)
-        header = next(reader)  # skip header row
-
-        # Detect column indices from header
+        header = next(reader)
         h = [c.strip().lower().replace("\n", " ") for c in header]
         col_account = 0
         col_type = next((i for i, c in enumerate(h) if "asset" in c or c == "type"), 2)
         col_value = next((i for i, c in enumerate(h) if "total" in c and "value" in c), 4)
         col_return = next((i for i, c in enumerate(h) if "return" in c), None)
-        col_yield = next((i for i, c in enumerate(h) if "yield" in c), None)
         col_start_date = next((i for i, c in enumerate(h) if "start date" in c), None)
         col_brokerage = next((i for i, c in enumerate(h) if "brokerage" in c), 1)
+        col_suffix = next((i for i, c in enumerate(h) if "suffix" in c), None)
 
         for row in reader:
             if len(row) <= max(col_account, col_type, col_value):
@@ -813,31 +1103,26 @@ def extract_passive_income(folder: str) -> dict | None:
             if not account:
                 continue
 
-            # Parse total value
+            # Parse total value (may be blank if statement is the source)
             val_str = row[col_value].strip().replace("$", "").replace(",", "")
             try:
                 total_value = float(val_str)
             except (ValueError, TypeError):
-                continue
+                total_value = 0.0
+
+            # Overlay statement balance if available (authoritative source)
+            acct_suffix = row[col_suffix].strip() if col_suffix is not None and col_suffix < len(row) else ""
+            stmt = _find_stmt(acct_suffix)
+            if stmt:
+                total_value = stmt["balance"]
+                balance_source = stmt["source"]
+                statement_date = stmt["date"]
+            else:
+                balance_source = "portfolio.csv"
+                statement_date = ""
+
             if total_value <= 0:
                 continue
-
-            # Parse yield — either explicit dollar amount or TBD
-            yield_str = row[col_yield].strip() if col_yield is not None and col_yield < len(row) else ""
-            if yield_str.upper() == "TBD" or not yield_str:
-                # Estimate from return rate * total value
-                rate_str = row[col_return].strip().replace("%", "") if col_return is not None and col_return < len(row) else ""
-                try:
-                    rate = float(rate_str) / 100
-                    annual_yield = total_value * rate
-                except (ValueError, TypeError):
-                    annual_yield = 0.0
-            else:
-                cleaned = yield_str.replace("$", "").replace(",", "")
-                try:
-                    annual_yield = float(cleaned)
-                except (ValueError, TypeError):
-                    annual_yield = 0.0
 
             # Parse investment start date
             start_date = None
@@ -850,17 +1135,40 @@ def extract_passive_income(folder: str) -> dict | None:
                     except ValueError:
                         continue
 
-            # Fall back to Wealth CSV lookup if start_date not in primary source
-            if start_date is None:
-                brokerage = row[col_brokerage].strip().replace("\n", " ").lower() if col_brokerage < len(row) else ""
-                start_date = start_date_lookup.get((account.lower(), brokerage)) or start_date_lookup.get(account.lower())
+            # Return %: prefer statement, fall back to CSV
+            if stmt and stmt.get("return_pct") is not None:
+                return_pct = stmt["return_pct"]
+                return_source = stmt["source"]
+            else:
+                rate_str = row[col_return].strip().replace("%", "") if col_return is not None and col_return < len(row) else ""
+                try:
+                    return_pct = float(rate_str)
+                except (ValueError, TypeError):
+                    return_pct = 0.0
+                return_source = "portfolio.csv"
+
+            # Yield: prefer statement dividends, else estimate from return × balance
+            if stmt and stmt.get("dividends_annual") is not None:
+                annual_yield = stmt["dividends_annual"]
+                yield_source = "statement dividends"
+            else:
+                annual_yield = total_value * return_pct / 100
+                yield_source = "estimated"
+
+            brokerage = row[col_brokerage].strip().replace("\n", " ") if col_brokerage < len(row) else ""
 
             entry = {
                 "account": account,
+                "brokerage": brokerage,
                 "type": asset_type,
                 "value": total_value,
                 "annual_yield": round(annual_yield, 2),
+                "return_pct": round(return_pct, 2),
+                "return_source": return_source,
+                "yield_source": yield_source,
                 "start_date": start_date,
+                "balance_source": balance_source,
+                "statement_date": statement_date,
             }
 
             # Route to appropriate bucket
@@ -912,15 +1220,22 @@ def extract_transfers(folder: str) -> dict:
     """
     TRANSFER_TYPES = {"TRFOUT", "TRFIN", "TRFINTF", "E_TRFOUT", "E_TRFIN", "EFTOUT"}
     transfers = defaultdict(lambda: {"in": 0.0, "out": 0.0})
-    debit_dir = os.path.join(folder, "debit card")
-    if not os.path.isdir(debit_dir):
-        return {}
 
-    debit_csvs = sorted(glob.glob(os.path.join(debit_dir, "*.csv")))
-    debit_csvs.extend(sorted(glob.glob(os.path.join(debit_dir, "*", "*.csv"))))
+    # Scan transactions/personal/ recursively (transfers come from debit-format CSVs, auto-detected)
+    txn_personal = os.path.join(folder, "transactions", "personal")
+    if not os.path.isdir(txn_personal):
+        # Backward compat: try old path
+        txn_personal = os.path.join(folder, "debit card")
+        if not os.path.isdir(txn_personal):
+            return {}
+
+    debit_csvs = sorted(glob.glob(os.path.join(txn_personal, "**", "*.csv"), recursive=True))
     for fpath in debit_csvs:
         with open(fpath, newline="", encoding="utf-8-sig") as f:
-            for row in csv.DictReader(f):
+            reader = csv.DictReader(f)
+            if "transaction" not in (reader.fieldnames or []):
+                continue  # skip non-debit CSVs
+            for row in reader:
                 txn_type = row["transaction"]
                 if txn_type not in TRANSFER_TYPES:
                     continue
@@ -944,12 +1259,14 @@ def extract_corporate_income(folder: str) -> dict | None:
     - Tall Tree Technology: CONT = client revenue (positive amounts)
     - Britton Holdings (Growth): DIV = dividend income (positive amounts)
     """
-    corp_dir = os.path.join(folder, "corporate")
+    corp_dir = os.path.join(folder, "transactions", "corporate")
     if not os.path.isdir(corp_dir):
-        return None
+        # Backward compat: try old path
+        corp_dir = os.path.join(folder, "corporate")
+        if not os.path.isdir(corp_dir):
+            return None
 
-    csv_files = sorted(glob.glob(os.path.join(corp_dir, "*.csv")))
-    csv_files.extend(sorted(glob.glob(os.path.join(corp_dir, "*", "*.csv"))))
+    csv_files = sorted(glob.glob(os.path.join(corp_dir, "**", "*.csv"), recursive=True))
     if not csv_files:
         return None
 
@@ -1959,6 +2276,43 @@ def generate_html(data: dict, ai_html: str | None = None,
 </section>"""
 
     # ── Passive Income section ──
+    def balance_cell(a: dict) -> str:
+        """Render a balance <td> with source annotation."""
+        src = a.get("balance_source", "")
+        dt = a.get("statement_date", "")
+        val = money(a["value"])
+        if src and src != "portfolio.csv":
+            note = dt if dt else src
+            return (f"<td style='text-align:right'>{val}"
+                    f"<br><span style='font-size:0.75em;color:var(--muted)'>{note}</span></td>")
+        else:
+            return (f"<td style='text-align:right;font-style:italic'>{val}"
+                    f"<br><span style='font-size:0.75em;color:#e67e22'>csv</span></td>")
+
+    def return_cell(a: dict) -> str:
+        """Render a return % <td> with source annotation."""
+        pct = a.get("return_pct", 0)
+        src = a.get("return_source", "portfolio.csv")
+        if src and src != "portfolio.csv":
+            note = src.replace(" statement", "").replace(" report", "")
+            return (f"<td style='text-align:right'>{pct:.1f}%"
+                    f"<br><span style='font-size:0.75em;color:var(--muted)'>{note}</span></td>")
+        else:
+            return f"<td style='text-align:right'>{pct:.1f}%</td>"
+
+    def yield_cell(a: dict, heatmap_bg: str) -> str:
+        """Render a yield <td> with source annotation and heatmap."""
+        val = money(a["annual_yield"])
+        src = a.get("yield_source", "estimated")
+        if src == "statement dividends":
+            note = "from dividends"
+        elif src == "estimated":
+            note = "est."
+        else:
+            note = ""
+        annotation = f"<br><span style='font-size:0.75em;color:var(--muted)'>{note}</span>" if note else ""
+        return f"<td style='text-align:right;background:{heatmap_bg}'>{val}{annotation}</td>"
+
     passive_section = ""
     if passive_income:
         # Accessible accounts table rows (sorted by yield desc, with heatmap)
@@ -1977,7 +2331,6 @@ def generate_html(data: dict, ai_html: str | None = None,
         acc_yields = [a['annual_yield'] for a in acc_sorted]
         acc_max_yield = max(acc_yields) if acc_yields else 1
         for a in acc_sorted:
-            ret_pct = (a['annual_yield'] / a['value'] * 100) if a['value'] else 0
             intensity = a['annual_yield'] / acc_max_yield if acc_max_yield else 0
             heatmap_bg = f"rgba(39, 174, 96, {intensity * 0.35:.2f})"
             expected_yield = a['value'] * acc_avg_return / 100
@@ -1996,10 +2349,10 @@ def generate_html(data: dict, ai_html: str | None = None,
             else:
                 gap_cell = f"<td style='text-align:right;color:#e67e22'>⚠️ −{money(abs(gap))}/yr{new_badge}</td>"
             acc_rows += (
-                f"<tr><td>{a['account']}</td><td>{a['type']}</td>"
-                f"<td style='text-align:right'>{money(a['value'])}</td>"
-                f"<td style='text-align:right'>{ret_pct:.1f}%</td>"
-                f"<td style='text-align:right;background:{heatmap_bg}'>{money(a['annual_yield'])}</td>"
+                f"<tr><td>{a['account']}</td><td>{a.get('brokerage','')}</td><td>{a['type']}</td>"
+                f"{balance_cell(a)}"
+                f"{return_cell(a)}"
+                f"{yield_cell(a, heatmap_bg)}"
                 f"{gap_cell}</tr>"
             )
         acc_unrealized = sum(g for g in acc_gaps if g < 0)
@@ -2017,7 +2370,6 @@ def generate_html(data: dict, ai_html: str | None = None,
             rrsp_yields = [a['annual_yield'] for a in rrsp_sorted]
             rrsp_max_yield = max(rrsp_yields) if rrsp_yields else 1
             for a in rrsp_sorted:
-                ret_pct = (a['annual_yield'] / a['value'] * 100) if a['value'] else 0
                 intensity = a['annual_yield'] / rrsp_max_yield if rrsp_max_yield else 0
                 heatmap_bg = f"rgba(39, 174, 96, {intensity * 0.35:.2f})"
                 expected_yield = a['value'] * rrsp_avg_return / 100
@@ -2036,22 +2388,22 @@ def generate_html(data: dict, ai_html: str | None = None,
                 else:
                     gap_cell = f"<td style='text-align:right;color:#e67e22'>⚠️ −{money(abs(gap))}/yr{new_badge}</td>"
                 rrsp_rows += (
-                    f"<tr><td>{a['account']}</td><td>{a['type']}</td>"
-                    f"<td style='text-align:right'>{money(a['value'])}</td>"
-                    f"<td style='text-align:right'>{ret_pct:.1f}%</td>"
-                    f"<td style='text-align:right;background:{heatmap_bg}'>{money(a['annual_yield'])}</td>"
+                    f"<tr><td>{a['account']}</td><td>{a.get('brokerage','')}</td><td>{a['type']}</td>"
+                    f"{balance_cell(a)}"
+                    f"{return_cell(a)}"
+                    f"{yield_cell(a, heatmap_bg)}"
                     f"{gap_cell}</tr>"
                 )
             rrsp_unrealized = sum(g for g in rrsp_gaps if g < 0)
-            rrsp_unrealized_row = f'<tr style="color:#e67e22"><td colspan="5">Unrealized</td><td style="text-align:right">−{money(abs(rrsp_unrealized))}/yr (−{money(abs(rrsp_unrealized) / 12)}/mo)</td></tr>' if rrsp_unrealized < 0 else ""
+            rrsp_unrealized_row = f'<tr style="color:#e67e22"><td colspan="6">Unrealized</td><td style="text-align:right">−{money(abs(rrsp_unrealized))}/yr (−{money(abs(rrsp_unrealized) / 12)}/mo)</td></tr>' if rrsp_unrealized < 0 else ""
             rrsp_html = f"""
     <h3 style="margin-top:30px">RRSP Accounts <span style="font-weight:400;color:var(--muted);font-size:0.85em">(tax-sheltered — not accessible without penalty)</span></h3>
     <table class="data-table" style="max-width:100%">
-        <thead><tr><th>Account</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Annual Yield</th><th style="text-align:right">vs Avg</th></tr></thead>
+        <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Annual Yield</th><th style="text-align:right">vs Avg</th></tr></thead>
         <tbody>{rrsp_rows}</tbody>
         <tfoot>
-            <tr style="font-weight:700"><td colspan="2">Total RRSP</td><td style="text-align:right">{money(passive_income['rrsp_balance'])}</td><td style="text-align:right">{rrsp_avg_return:.1f}%</td><td style="text-align:right">{money(passive_income['rrsp_annual'])}</td><td></td></tr>
-            <tr style="color:var(--muted)"><td colspan="5">Monthly Income</td><td style="text-align:right">{money(passive_income['rrsp_monthly'])}</td></tr>
+            <tr style="font-weight:700"><td colspan="3">Total RRSP</td><td style="text-align:right">{money(passive_income['rrsp_balance'])}</td><td style="text-align:right">{rrsp_avg_return:.1f}%</td><td style="text-align:right">{money(passive_income['rrsp_annual'])}</td><td></td></tr>
+            <tr style="color:var(--muted)"><td colspan="6">Monthly Income</td><td style="text-align:right">{money(passive_income['rrsp_monthly'])}</td></tr>
             {rrsp_unrealized_row}
         </tfoot>
     </table>"""
@@ -2062,12 +2414,12 @@ def generate_html(data: dict, ai_html: str | None = None,
     <p style="color:var(--muted);margin-bottom:15px">Yield from personal investment accounts — accessible balance breakdown</p>
     <h3>Accessible Accounts</h3>
     <table class="data-table" style="max-width:100%">
-        <thead><tr><th>Account</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Annual Yield</th><th style="text-align:right">vs Avg</th></tr></thead>
+        <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Annual Yield</th><th style="text-align:right">vs Avg</th></tr></thead>
         <tbody>{acc_rows}</tbody>
         <tfoot>
-            <tr style="font-weight:700"><td colspan="2">Total Accessible</td><td style="text-align:right">{money(acc_total_balance)}</td><td style="text-align:right">{acc_avg_return:.1f}%</td><td style="text-align:right">{money(acc_total_annual)}</td><td></td></tr>
-            <tr style="color:var(--muted)"><td colspan="5">Monthly Income</td><td style="text-align:right">{money(acc_monthly)}</td></tr>
-            {'<tr style="color:#e67e22"><td colspan="5">Unrealized</td><td style="text-align:right">−' + money(abs(acc_unrealized)) + '/yr (−' + money(abs(acc_unrealized) / 12) + '/mo)</td></tr>' if acc_unrealized < 0 else ""}
+            <tr style="font-weight:700"><td colspan="3">Total Accessible</td><td style="text-align:right">{money(acc_total_balance)}</td><td style="text-align:right">{acc_avg_return:.1f}%</td><td style="text-align:right">{money(acc_total_annual)}</td><td></td></tr>
+            <tr style="color:var(--muted)"><td colspan="6">Monthly Income</td><td style="text-align:right">{money(acc_monthly)}</td></tr>
+            {'<tr style="color:#e67e22"><td colspan="6">Unrealized</td><td style="text-align:right">−' + money(abs(acc_unrealized)) + '/yr (−' + money(abs(acc_unrealized) / 12) + '/mo)</td></tr>' if acc_unrealized < 0 else ""}
         </tfoot>
     </table>
     {rrsp_html}
