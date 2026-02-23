@@ -2197,6 +2197,7 @@ def generate_html(data: dict, ai_html: str | None = None,
         spotlight_html = f"""
 <section class="card" style="margin-bottom:20px">
     <h2>Monthly Spotlight: {spot_label}</h2>
+    <p style="color:var(--muted);font-style:italic;margin-bottom:15px">Your most recent month at a glance — top categories and biggest transactions vs prior month.</p>
     <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:15px;margin-bottom:20px">
         <div class="stat"><div class="value">{money(spot_total)}</div><div class="label">Total Spend</div></div>
         <div class="stat"><div class="value">{delta_badge(delta_prior, delta_prior_pct)}</div><div class="label">vs Prior Month</div></div>
@@ -2522,7 +2523,7 @@ def generate_html(data: dict, ai_html: str | None = None,
         debt_section = f"""
 <section id="debt-freedom" class="card">
     <h2>Debt Freedom</h2>
-    <p style="color:var(--muted);margin-bottom:15px">Debts paid off during this period — saving <strong style="color:#27ae60">{money(annual_interest_saved)}/year</strong> ({money(monthly_saved)}/month) in interest</p>
+    <p style="color:var(--muted);font-style:italic;margin-bottom:15px">Debts paid off during this period — saving <strong style="color:#27ae60">{money(annual_interest_saved)}/year</strong> ({money(monthly_saved)}/month) in interest</p>
     <table class="data-table" style="max-width:700px">
         <thead><tr><th>Debt</th><th style="text-align:right">Principal</th><th style="text-align:center">Rate</th><th style="text-align:right">Annual Savings</th><th style="text-align:center">Paid Off</th></tr></thead>
         <tbody>{debt_rows}</tbody>
@@ -2536,7 +2537,7 @@ def generate_html(data: dict, ai_html: str | None = None,
         fixed_section = f"""
 <section id="fixed-discretionary" class="card">
     <h2>Fixed vs Discretionary</h2>
-    <p style="color:var(--muted);margin-bottom:15px">{fixed_pct}% of total spending is fixed (pre-authorized recurring debits)</p>
+    <p style="color:var(--muted);font-style:italic;margin-bottom:15px">{fixed_pct}% of total spending is fixed (pre-authorized recurring debits)</p>
     <div class="chart-row">
         <div>
             <table class="data-table">
@@ -2579,7 +2580,7 @@ def generate_html(data: dict, ai_html: str | None = None,
         corporate_section = f"""
 <section id="corporate-income" class="card">
     <h2>Corporate Income</h2>
-    <p style="color:var(--muted);margin-bottom:15px">Revenue from Tall Tree Technology (client payments) and dividends from Britton Holdings Growth (investment portfolio)</p>
+    <p style="color:var(--muted);font-style:italic;margin-bottom:15px">Revenue from Tall Tree Technology (client payments) and dividends from Britton Holdings Growth (investment portfolio)</p>
     {corp_revenue_warning}
     <table class="data-table" style="max-width:600px">
         <thead><tr><th>Month</th><th style="text-align:right">Revenue (Tall Tree)</th><th style="text-align:right">Dividends (BH Growth)</th><th style="text-align:right">Total</th></tr></thead>
@@ -2626,7 +2627,7 @@ def generate_html(data: dict, ai_html: str | None = None,
         etransfer_income_section = f"""
 <section id="incoming-etransfers" class="card">
     <h2>Incoming e-Transfers</h2>
-    <p style="color:var(--muted);margin-bottom:15px">Interac e-Transfer reimbursements received &mdash; {len(incoming_etransfers)} transactions totalling {money(etransfer_in_total)}</p>
+    <p style="color:var(--muted);font-style:italic;margin-bottom:15px">Interac e-Transfer reimbursements received &mdash; {len(incoming_etransfers)} transactions totalling {money(etransfer_in_total)}</p>
     <table class="data-table" style="max-width:600px">
         <thead><tr><th>Date</th><th>Note</th><th style="text-align:right">Amount</th></tr></thead>
         <tbody>{etransfer_in_rows}</tbody>
@@ -2654,7 +2655,7 @@ def generate_html(data: dict, ai_html: str | None = None,
         bank_interest_section = f"""
 <section id="bank-interest" class="card">
     <h2>Bank Interest</h2>
-    <p style="color:var(--muted);margin-bottom:15px">Interest earned on cash and savings accounts &mdash; {len(bank_interest)} payments totalling {money(bi_total)}</p>
+    <p style="color:var(--muted);font-style:italic;margin-bottom:15px">Interest earned on cash and savings accounts &mdash; {len(bank_interest)} payments totalling {money(bi_total)}</p>
     <table class="data-table" style="max-width:600px">
         <thead><tr><th>Date</th><th>Account</th><th style="text-align:right">Amount</th></tr></thead>
         <tbody>{bi_rows}</tbody>
@@ -2786,7 +2787,7 @@ def generate_html(data: dict, ai_html: str | None = None,
         passive_section = f"""
 <section id="passive-income" class="card">
     <h2>Investment Portfolio</h2>
-    <p style="color:var(--muted);margin-bottom:15px">Income from personal investment accounts — accessible balance breakdown</p>
+    <p style="color:var(--muted);font-style:italic;margin-bottom:15px">Yield and growth from personal investment accounts — accessible and registered holdings</p>
     <h3>Accessible Accounts</h3>
     <table class="data-table" style="max-width:100%">
         <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Income/yr</th><th style="text-align:right">Growth/yr</th><th style="text-align:right">vs Avg</th></tr></thead>
@@ -2924,7 +2925,7 @@ canvas {{ max-width: 100%; }}
 
 <section id="categories" class="card">
     <h2>Category Heatmap</h2>
-    <p style="color:var(--muted);margin-bottom:15px">Spending intensity by category over the last 6 months. Darker cells = higher relative spend.</p>
+    <p style="color:var(--muted);font-style:italic;margin-bottom:15px">Spending intensity by category over the last 6 months, sorted by total. Darker cells = higher spend.</p>
     <div style="overflow-x:auto">
     <table class="data-table">
         <thead><tr><th>Category</th>{heatmap_month_headers}<th style="text-align:right">Avg</th><th style="text-align:right">6m Total</th></tr></thead>
@@ -2937,7 +2938,7 @@ canvas {{ max-width: 100%; }}
 
 <section id="subscriptions" class="card">
     <h2>Subscription Audit</h2>
-    <p style="color:var(--muted);margin-bottom:15px">Recurring charges detected across your statements, grouped by status.</p>
+    <p style="color:var(--muted);font-style:italic;margin-bottom:15px">Recurring charges detected across your statements, grouped by status.</p>
     <div style="overflow-x:auto">
     <table class="data-table">
         <thead><tr><th>Service</th><th style="text-align:right">Avg/Mo</th>{sub_month_headers}</tr></thead>
@@ -2947,7 +2948,7 @@ canvas {{ max-width: 100%; }}
     </div>
 </section>
 
-{'<section id="interac-transfers" class="card"><h2>Interac e-Transfer Details</h2><p>All outgoing e-Transfers &mdash; ' + str(len(etransfer_txns)) + ' transactions totalling ' + money(etransfer_total) + '</p><table class="data-table"><thead><tr><th>Date</th><th>Note</th><th style="text-align:right">Amount</th></tr></thead><tbody>' + etransfer_rows + '</tbody></table></section>' if etransfer_txns else ''}
+{'<section id="interac-transfers" class="card"><h2>Interac e-Transfer Details</h2><p style="color:var(--muted);font-style:italic;margin-bottom:15px">All outgoing e-Transfers &mdash; ' + str(len(etransfer_txns)) + ' transactions totalling ' + money(etransfer_total) + '</p><table class="data-table"><thead><tr><th>Date</th><th>Note</th><th style="text-align:right">Amount</th></tr></thead><tbody>' + etransfer_rows + '</tbody></table></section>' if etransfer_txns else ''}
 </div>
 
 <!-- ═══ MILESTONES ═══ -->
