@@ -2455,7 +2455,7 @@ def generate_html(data: dict, ai_html: str | None = None,
 
         passive_section = f"""
 <section id="passive-income" class="card">
-    <h2>Passive Income &amp; Accessible Savings</h2>
+    <h2>Investment Portfolio</h2>
     <p style="color:var(--muted);margin-bottom:15px">Income from personal investment accounts — accessible balance breakdown</p>
     <h3>Accessible Accounts</h3>
     <table class="data-table" style="max-width:100%">
