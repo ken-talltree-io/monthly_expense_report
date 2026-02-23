@@ -779,7 +779,7 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
             if not fname.lower().endswith(".pdf"):
                 continue
             if "_CRM2_" in fname:
-                continue  # CRM2 reports handled separately
+                continue  # skip CRM2 annual reports (return % managed in portfolio.csv)
             parts = fname.split("_")
             if len(parts) < 3:
                 continue
@@ -862,38 +862,6 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
             results[suffix]["dividends_annual"] = round(
                 total_income / len(months_seen) * 12, 2
             )
-
-    # ── Wealthsimple CRM2 performance reports ────────────────────────────
-    for ownership in ["personal", "corporate"]:
-        ws_dir = os.path.join(stmt_dir, ownership, "Wealthsimple")
-        if not os.path.isdir(ws_dir):
-            continue
-        for fname in os.listdir(ws_dir):
-            if "_CRM2_" not in fname or "_CRM2_FEE_" in fname:
-                continue
-            if not fname.lower().endswith(".pdf"):
-                continue
-            suffix = fname.split("_")[0]
-            crm2_text = _pdf_text(os.path.join(ws_dir, fname))
-            if not crm2_text:
-                continue
-            # "Since Account Opening" header on one line, percentages on next non-empty line
-            lines = crm2_text.split("\n")
-            for i, line in enumerate(lines):
-                if "Since Account Opening" in line:
-                    for j in range(i + 1, min(i + 5, len(lines))):
-                        pcts = re.findall(r"([\d.]+)%", lines[j])
-                        if pcts:
-                            val = float(pcts[-1])  # last column = Since Account Opening
-                            if suffix in results:
-                                results[suffix]["return_pct"] = val
-                            else:
-                                results[suffix] = {
-                                    "balance": 0, "date": "", "source": "CRM2 report",
-                                    "return_pct": val, "dividends_annual": None,
-                                }
-                            break
-                    break
 
     # ── Steadyhand (consolidated quarterly PDFs) ────────────────────────────
     sh_dir = os.path.join(stmt_dir, "personal", "Steadyhand")
