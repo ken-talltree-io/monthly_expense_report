@@ -1498,10 +1498,6 @@ def analyze(transactions: list[dict], transfers: dict | None = None,
 
     subscriptions.sort(key=lambda s: s["avg"], reverse=True)
 
-    # Top merchants
-    top_merchants = sorted(merchant_totals.items(), key=lambda x: x[1], reverse=True)[:20]
-    top_merchants = [(m, round(t, 2), merchant_counts[m]) for m, t in top_merchants]
-
     # Categories sorted by total
     categories = sorted(category_totals.items(), key=lambda x: x[1], reverse=True)
     num_months = len(months_set)
@@ -1535,7 +1531,6 @@ def analyze(transactions: list[dict], transfers: dict | None = None,
         "categories": categories,
         "category_monthly": {c: {m: round(category_monthly[c].get(m, 0), 2) for m in months_set} for c in category_totals},
         "subscriptions": subscriptions,
-        "top_merchants": top_merchants,
         "monthly_txns": {m: sorted(monthly_txns[m], key=lambda t: t["date"]) for m in months_set},
         "transfers": transfers,
         "fixed_costs": {m: round(sum(v.get(m, 0) for v in fixed_merchants.values()), 2) for m in months_set},
@@ -1574,10 +1569,6 @@ def get_ai_recommendations(data: dict, passive_income: dict | None = None,
              "status": s["status"], "alerts": s["alerts"],
              "history": s["history"]}
             for s in data["subscriptions"]
-        ],
-        "top_merchants": [
-            {"name": m, "total": t, "txn_count": c}
-            for m, t, c in data["top_merchants"]
         ],
         "fixed_costs": [
             {"merchant": m, "total": t} for m, t, _ in data.get("fixed_cost_detail", [])
@@ -1921,13 +1912,6 @@ def generate_html(data: dict, ai_html: str | None = None,
             {month_cells}
         </tr>"""
 
-    # Top merchants table
-    top_rows = ""
-    for i, (m, t, c) in enumerate(data["top_merchants"], 1):
-        note = notes.get(m.lower(), "")
-        note_html = f"<br><small style='color:#4e79a7;font-style:italic'>{note}</small>" if note else ""
-        top_rows += f"<tr><td>{i}</td><td>{m}{note_html}</td><td style='text-align:right'>{money(t)}</td><td style='text-align:center'>{c}</td></tr>"
-
     # Category table with sparklines and budget bars
     has_budgets = bool(budgets)
     cat_rows = ""
@@ -1940,26 +1924,6 @@ def generate_html(data: dict, ai_html: str | None = None,
             no_budget = '<span style="color:#ccc">—</span>'
             budget_cell = f"<td>{budget_bar(a, target) if target else no_budget}</td>"
         cat_rows += f"<tr><td>{c}</td><td style='text-align:right'>{money(t)}</td><td style='text-align:right'>{money(a)}</td>{budget_cell}<td style='text-align:center'>{spark}</td><td style='text-align:center'>{n}</td></tr>"
-
-    # Monthly detail sections (last 3 months only)
-    monthly_sections = ""
-    recent_months = months[-3:]
-    for m in recent_months:
-        label = datetime.strptime(m, "%Y-%m").strftime("%B %Y")
-        txns = data["monthly_txns"][m]
-        m_total = data["monthly_totals"][m]
-        txn_rows = ""
-        for t in txns:
-            source_tag = f" <small style='color:#76b7b2'>[D]</small>" if t.get("source") == "debit" else ""
-            txn_rows += f"<tr><td>{t['date'].strftime('%b %d')}</td><td>{t['merchant']}{source_tag}</td><td style='color:#888;font-size:0.85em'>{t['category']}</td><td style='text-align:right'>{money(t['amount'])}</td></tr>"
-        monthly_sections += f"""
-        <details class="month-detail">
-            <summary><strong>{label}</strong> — {money(m_total)} ({len(txns)} transactions)</summary>
-            <table class="data-table">
-                <thead><tr><th>Date</th><th>Merchant</th><th>Category</th><th style="text-align:right">Amount</th></tr></thead>
-                <tbody>{txn_rows}</tbody>
-            </table>
-        </details>"""
 
     # Trend indicator
     trend_arrow = "\u2191" if data["mom_change"] > 0 else "\u2193" if data["mom_change"] < 0 else "\u2192"
@@ -2570,7 +2534,6 @@ canvas {{ max-width: 100%; }}
     <button data-tab="tab-spending">Spending</button>
     {milestones_tab_btn}
     {ai_tab_btn}
-    <button data-tab="tab-deep-dives">Deep Dives</button>
 </div>
 
 <!-- ═══ THE BIG PICTURE ═══ -->
@@ -2630,22 +2593,6 @@ canvas {{ max-width: 100%; }}
 <!-- ═══ AI RECOMMENDATIONS ═══ -->
 {'<div class="tab-panel" id="tab-ai">' + ai_section + '</div>' if ai_html else ''}
 
-<!-- ═══ DEEP DIVES ═══ -->
-<div class="tab-panel" id="tab-deep-dives">
-
-<section id="top-merchants" class="card">
-    <h2>Top 20 Merchants</h2>
-    <table class="data-table">
-        <thead><tr><th>#</th><th>Merchant</th><th style="text-align:right">Total</th><th style="text-align:center">Transactions</th></tr></thead>
-        <tbody>{top_rows}</tbody>
-    </table>
-</section>
-
-<section id="monthly-detail" class="card">
-    <h2>Monthly Detail</h2>
-    {monthly_sections}
-</section>
-</div>
 
 <script>
 document.addEventListener('DOMContentLoaded', function() {{
