@@ -725,6 +725,21 @@ def parse_csvs(folder: str) -> list[dict]:
                             "source": "debit",
                             "fixed_cost": True,
                         })
+                    elif txn_type == "E_TRFOUT":
+                        date = datetime.strptime(row["date"], "%Y-%m-%d")
+                        merchant = "Interac e-Transfer"
+                        category = categorize(merchant)
+                        category = CATEGORY_CONSOLIDATION.get(category, category)
+                        amt = abs(amount)
+                        transactions.append({
+                            "date": date,
+                            "month": date.strftime("%Y-%m"),
+                            "raw_merchant": description,
+                            "merchant": merchant,
+                            "category": category,
+                            "amount": amt,
+                            "source": "debit",
+                        })
 
     print(f"Found {credit_count} credit card and {debit_count} debit card CSV files")
     if business_total > 0:
