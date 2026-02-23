@@ -797,13 +797,15 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
         if not text:
             continue
 
-        # Parse balance: "Total Portfolio" followed by $amount and 100.00
+        # Parse balance + book cost: "Total Portfolio  $market  100.00  $book  100.00"
         m = re.search(
-            r"Total Portfolio\s+\$([0-9,]+\.\d{2})\s+100\.00", text
+            r"Total Portfolio\s+\$([0-9,]+\.\d{2})\s+100\.00\s+\$([0-9,]+\.\d{2})\s+100\.00",
+            text,
         )
         if not m:
             continue
         balance = float(m.group(1).replace(",", ""))
+        book_cost = float(m.group(2).replace(",", ""))
 
         # Handle USD accounts: convert to CAD using statement exchange rate
         is_usd = suffix.upper().endswith("USD")
@@ -812,7 +814,9 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                 r"\$1 USD = \$([0-9.]+) CAD", text
             )
             if fx:
-                balance = round(balance * float(fx.group(1)), 2)
+                fx_rate = float(fx.group(1))
+                balance = round(balance * fx_rate, 2)
+                book_cost = round(book_cost * fx_rate, 2)
             else:
                 # Check other Wealthsimple PDFs for an exchange rate
                 for other_suffix, other_files in ws_pdfs.items():
@@ -821,7 +825,9 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                     other_text = _pdf_text(other_files[0][1])
                     fx = re.search(r"\$1 USD = \$([0-9.]+) CAD", other_text)
                     if fx:
-                        balance = round(balance * float(fx.group(1)), 2)
+                        fx_rate = float(fx.group(1))
+                        balance = round(balance * fx_rate, 2)
+                        book_cost = round(book_cost * fx_rate, 2)
                         break
                 else:
                     continue  # Can't convert; skip this account
@@ -832,11 +838,15 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
         )
         stmt_date = dm.group(2) if dm else date_seg
 
+        # Simple return rate: (market_value - book_cost) / book_cost
+        simple_return = round((balance - book_cost) / book_cost * 100, 2) if book_cost > 0 else None
+
         results[suffix] = {
             "balance": balance,
             "date": stmt_date,
             "source": "Wealthsimple statement",
-            "return_pct": None,
+            "return_pct": simple_return,
+            "return_source": "estimated",
             "dividends_annual": None,
         }
 
@@ -914,14 +924,33 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                         "dividends_annual": None,
                     }
 
-                # Parse per-account since-inception returns (first match per account wins)
+                # Parse per-account 1-year returns (first match per account wins)
                 for acct_m in re.finditer(r"Account (\d{7})\s+\w", text):
                     acct_num = acct_m.group(1)
                     if acct_num not in results or results[acct_num]["return_pct"] is not None:
                         continue
-                    si = re.search(r"Since Inception\s+([\d.]+)", text[acct_m.start():])
+                    si = re.search(r"1 Year\s+([\d.]+)", text[acct_m.start():])
                     if si:
                         results[acct_num]["return_pct"] = float(si.group(1))
+
+                # Parse per-account dividends from "Distribution - Reinvested" lines
+                # Quarterly statements: sum amounts, annualize by ×4
+                for acct_num in list(results.keys()):
+                    if not results[acct_num]["source"].startswith("Steadyhand"):
+                        continue
+                    acct_pattern = f"Account {acct_num}"
+                    acct_pos = text.find(acct_pattern)
+                    if acct_pos == -1:
+                        continue
+                    # Scope to this account's section (up to next account or end)
+                    next_acct = re.search(r"Account \d{7}", text[acct_pos + len(acct_pattern):])
+                    end_pos = (acct_pos + len(acct_pattern) + next_acct.start()) if next_acct else len(text)
+                    section = text[acct_pos:end_pos]
+                    total_dist = 0.0
+                    for dist_m in re.finditer(r"Distribution - Reinvested\s+[\d/]+\s+([\d,]+\.\d{2})", section):
+                        total_dist += float(dist_m.group(1).replace(",", ""))
+                    if total_dist > 0:
+                        results[acct_num]["dividends_annual"] = round(total_dist * 4, 2)
 
     # ── Scotiabank Chequing (e-statement PDFs) ───────────────────────────
     MONTH_NAMES = {
@@ -1008,17 +1037,56 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                     "dividends_annual": None,
                 }
 
+    # ── BC Property Assessments (sidecar CSV beside scanned PDFs) ───────────
+    bc_dir = os.path.join(stmt_dir, "personal", "British Columbia")
+    bc_csv = os.path.join(bc_dir, "property_assessments.csv")
+    if os.path.isfile(bc_csv):
+        # Collect all rows, then keep only the most recent year per suffix
+        bc_rows: dict[str, tuple[int, dict]] = {}  # suffix -> (year, row_data)
+        with open(bc_csv, newline="", encoding="utf-8-sig") as f:
+            for row in csv.DictReader(f):
+                suffix = row.get("Suffix", "").strip()
+                if not suffix:
+                    continue
+                year = row.get("Year", "").strip()
+                try:
+                    year_int = int(year)
+                except (ValueError, TypeError):
+                    continue
+                if suffix in bc_rows and bc_rows[suffix][0] >= year_int:
+                    continue
+                val_str = row.get("Assessed Value", "").strip().replace("$", "").replace(",", "")
+                try:
+                    balance = float(val_str)
+                except (ValueError, TypeError):
+                    continue
+                change_str = row.get("Change", "").strip().replace("%", "")
+                try:
+                    return_pct = float(change_str)
+                except (ValueError, TypeError):
+                    return_pct = None
+                bc_rows[suffix] = (year_int, {
+                    "balance": balance,
+                    "date": f"{year} assessment",
+                    "source": "BC Assessment",
+                    "return_pct": return_pct,
+                    "return_source": "BC Assessment",
+                    "dividends_annual": None,
+                })
+        for suffix, (_, entry) in bc_rows.items():
+            results[suffix] = entry
+
     return results
 
 
 # ── Income & Transfer Extraction ─────────────────────────────────────────────
 
-def extract_passive_income(folder: str) -> dict | None:
-    """Extract annual passive income from investment portfolio CSV.
+def extract_passive_income(folder: str, source: str = "csv") -> dict | None:
+    """Extract annual passive income from investment portfolio.
 
-    Reads portfolio.csv and sums yield (annual income) for personal accounts.
-    Excludes Corporate, RESP, and Property accounts.
-    For accounts with TBD yield, estimates from return rate * total value.
+    source="csv":        All financials from portfolio.csv (no PDF parsing).
+    source="statements": Balances/returns/income from PDF statements;
+                         portfolio.csv still provides account list & metadata.
     """
     portfolio_path = os.path.join(folder, "portfolio.csv")
     if not os.path.exists(portfolio_path):
@@ -1031,8 +1099,8 @@ def extract_passive_income(folder: str) -> dict | None:
     corporate_accts = []
     property_accts = []
 
-    # Parse statement balances (authoritative source for totals)
-    stmt_balances = parse_statement_balances(folder)
+    # Parse statement balances only in statements mode
+    stmt_balances = parse_statement_balances(folder) if source == "statements" else {}
 
     # Build suffix → statement balance lookup (also match suffixes that are
     # a trailing substring of the statement key, e.g. CSV "6905CAD" matches
@@ -1083,18 +1151,26 @@ def extract_passive_income(folder: str) -> dict | None:
             acct_suffix = row[col_suffix].strip() if col_suffix is not None and col_suffix < len(row) else ""
             stmt = _find_stmt(acct_suffix)
 
-            if csv_value is not None and csv_value > 0:
-                total_value = csv_value
-                balance_source = "portfolio.csv"
-                statement_date = ""
-            elif stmt:
-                total_value = stmt["balance"]
-                balance_source = stmt["source"]
-                statement_date = stmt["date"]
+            if source == "csv":
+                # CSV mode: balance from portfolio.csv only
+                if csv_value is not None and csv_value > 0:
+                    total_value = csv_value
+                    balance_source = "csv"
+                    statement_date = ""
+                else:
+                    total_value = 0.0
+                    balance_source = ""
+                    statement_date = ""
             else:
-                total_value = 0.0
-                balance_source = ""
-                statement_date = ""
+                # Statement mode: balance from statement only
+                if stmt:
+                    total_value = stmt["balance"]
+                    balance_source = stmt["source"]
+                    statement_date = stmt["date"]
+                else:
+                    total_value = 0.0
+                    balance_source = ""
+                    statement_date = ""
 
             if total_value <= 0:
                 continue
@@ -1110,7 +1186,7 @@ def extract_passive_income(folder: str) -> dict | None:
                     except ValueError:
                         continue
 
-            # Return %: portfolio.csv overrides, then statement, then 0
+            # Return %
             rate_str = row[col_return].strip().replace("%", "") if col_return is not None and col_return < len(row) else ""
             csv_return = None
             if rate_str and rate_str != "TBD":
@@ -1118,18 +1194,25 @@ def extract_passive_income(folder: str) -> dict | None:
                     csv_return = float(rate_str)
                 except (ValueError, TypeError):
                     pass
-            if csv_return is not None:
-                return_pct = csv_return
-                return_source = "portfolio.csv"
-            elif stmt and stmt.get("return_pct") is not None:
-                return_pct = stmt["return_pct"]
-                return_source = stmt["source"]
+
+            if source == "csv":
+                # CSV mode: return from portfolio.csv only
+                if csv_return is not None:
+                    return_pct = csv_return
+                    return_source = "csv"
+                else:
+                    return_pct = 0.0
+                    return_source = ""
             else:
-                return_pct = 0.0
-                return_source = ""
+                # Statement mode: return from statement only
+                if stmt and stmt.get("return_pct") is not None:
+                    return_pct = stmt["return_pct"]
+                    return_source = stmt.get("return_source", stmt["source"])
+                else:
+                    return_pct = 0.0
+                    return_source = ""
 
             # Income vs Growth split
-            # Priority: statement dividends → Yield % from CSV → Interest strategy → unknown
             total_return_annual = total_value * return_pct / 100
             strategy = row[col_strategy].strip() if col_strategy is not None and col_strategy < len(row) else ""
 
@@ -1142,20 +1225,31 @@ def extract_passive_income(folder: str) -> dict | None:
                     except (ValueError, TypeError):
                         pass
 
-            if stmt and stmt.get("dividends_annual") is not None:
-                income_annual = stmt["dividends_annual"]
-                income_source = "dividends"
-            elif csv_yield is not None:
-                income_annual = total_value * csv_yield / 100
-                income_source = "yield"
-            elif strategy == "Interest":
-                income_annual = total_return_annual
-                income_source = "interest"
+            if source == "csv":
+                # CSV mode: income from yield% or interest strategy
+                if csv_yield is not None:
+                    income_annual = total_value * csv_yield / 100
+                    income_source = "yield"
+                elif strategy == "Interest":
+                    income_annual = total_return_annual
+                    income_source = "interest"
+                else:
+                    income_annual = 0.0
+                    income_source = ""
+                growth_annual = total_return_annual - income_annual
             else:
-                income_annual = 0.0
-                income_source = ""
-
-            growth_annual = total_return_annual - income_annual
+                # Statement mode: income from statement dividends only
+                if stmt and stmt.get("dividends_annual") is not None:
+                    income_annual = stmt["dividends_annual"]
+                    income_source = "dividends"
+                else:
+                    income_annual = 0.0
+                    income_source = ""
+                # Only compute growth when we have a statement return %
+                if return_pct > 0:
+                    growth_annual = total_return_annual - income_annual
+                else:
+                    growth_annual = 0.0
 
             brokerage = row[col_brokerage].strip().replace("\n", " ") if col_brokerage < len(row) else ""
 
@@ -2250,14 +2344,15 @@ def generate_html(data: dict, ai_html: str | None = None,
     def return_cell(a: dict) -> str:
         """Render a return % <td> with source annotation."""
         pct = a.get("return_pct", 0)
-        src = a.get("return_source", "portfolio.csv")
-        if src and src != "portfolio.csv":
-            note = src.replace(" statement", "").replace(" report", "")
-            return (f"<td style='text-align:right'>{pct:.1f}%"
-                    f"<br><span style='font-size:0.75em;color:var(--muted)'>{note}</span></td>")
-        else:
+        src = a.get("return_source", "")
+        if not src and pct == 0:
+            return "<td style='text-align:right;color:var(--muted)'>—</td>"
+        if src == "csv":
             return (f"<td style='text-align:right;font-style:italic'>{pct:.1f}%"
                     f"<br><span style='font-size:0.75em;color:#e67e22'>csv</span></td>")
+        note = src.replace(" statement", "").replace(" report", "")
+        return (f"<td style='text-align:right'>{pct:.1f}%"
+                f"<br><span style='font-size:0.75em;color:var(--muted)'>{note}</span></td>")
 
     def income_cell(a: dict) -> str:
         """Render Income/yr <td> with source annotation."""
@@ -2634,6 +2729,8 @@ def main():
     parser = argparse.ArgumentParser(description="Financial Dashboard & Subscription Auditor")
     parser.add_argument("--path", default=".", help="Folder containing CSV files (default: current directory)")
     parser.add_argument("--ai", action="store_true", help="Generate AI-powered recommendations (requires ANTHROPIC_API_KEY)")
+    parser.add_argument("--source", choices=["csv", "statements"], default="csv",
+                        help="Financial data source: csv (portfolio.csv) or statements (PDF statements)")
     args = parser.parse_args()
 
     folder = os.path.abspath(args.path)
@@ -2656,9 +2753,9 @@ def main():
         print(f"Found transfer data across {len(transfers)} months")
 
     # Extract passive income from investment portfolio
-    passive_income = extract_passive_income(folder)
+    passive_income = extract_passive_income(folder, source=args.source)
     if passive_income:
-        print(f"Portfolio passive income: ${passive_income['annual_income']:,.2f}/year (${passive_income['monthly_income']:,.2f}/month) from {len(passive_income['accounts'])} accounts")
+        print(f"Portfolio passive income ({args.source}): ${passive_income['annual_income']:,.2f}/year (${passive_income['monthly_income']:,.2f}/month) from {len(passive_income['accounts'])} accounts")
 
     # Extract corporate income from corporate accounts
     corporate_income = extract_corporate_income(folder)
