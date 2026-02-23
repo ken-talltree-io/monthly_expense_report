@@ -1672,7 +1672,9 @@ def get_ai_recommendations(data: dict, passive_income: dict | None = None,
             "accounts": [
                 {"name": a["account"], "type": a["type"],
                  "balance": a["value"], "income_annual": a["income_annual"],
-                 "growth_annual": a["growth_annual"], "return_pct": a["return_pct"]}
+                 "growth_annual": a["growth_annual"], "return_pct": a["return_pct"],
+                 "strategy": a.get("strategy", ""), "brokerage": a.get("brokerage", ""),
+                 "start_date": str(a["start_date"]) if a.get("start_date") else ""}
                 for a in passive_income["accounts"]
             ],
             "registered_annual": passive_income.get("registered_annual", 0),
@@ -1682,7 +1684,9 @@ def get_ai_recommendations(data: dict, passive_income: dict | None = None,
             "registered_accounts": [
                 {"name": a["account"], "type": a["type"],
                  "balance": a["value"], "income_annual": a["income_annual"],
-                 "growth_annual": a["growth_annual"], "return_pct": a["return_pct"]}
+                 "growth_annual": a["growth_annual"], "return_pct": a["return_pct"],
+                 "strategy": a.get("strategy", ""), "brokerage": a.get("brokerage", ""),
+                 "start_date": str(a["start_date"]) if a.get("start_date") else ""}
                 for a in passive_income.get("registered_accounts", [])
             ],
             "net_worth": {
