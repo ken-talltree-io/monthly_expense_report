@@ -2597,7 +2597,6 @@ def generate_html(data: dict, ai_html: str | None = None,
     # ── Sustainability Projection ──
     sustainability_card = ""
     sustainability_chart_js = ""
-    coverage_milestones = {}
     if passive_income and accessible_balance > 0 and burn_rate > 0:
         annual_income_proj = passive_income["annual_income"]
         annual_growth_proj = passive_income.get("annual_growth", 0)
@@ -2625,8 +2624,6 @@ def generate_html(data: dict, ai_html: str | None = None,
         already_sustainable = (monthly_passive >= burn_rate)
         now = datetime.now()
         max_months = 120
-        coverage_milestones = {}  # {pct: (month_idx, date, balance, passive_income)}
-
         for i in range(max_months):
             m_date = datetime(now.year, now.month, 1) + timedelta(days=32 * i)
             m_date = m_date.replace(day=1)
@@ -2636,12 +2633,6 @@ def generate_html(data: dict, ai_html: str | None = None,
             proj_burn.append(round(burn_rate, 2))
             if crossover_month is None and passive_this_month >= burn_rate and i > 0:
                 crossover_month = i
-            # Track intermediate coverage milestones
-            if i > 0 and burn_rate > 0:
-                pct = passive_this_month / burn_rate * 100
-                for threshold in (25, 50, 75, 100):
-                    if threshold not in coverage_milestones and pct >= threshold:
-                        coverage_milestones[threshold] = (i, m_date.date(), proj_balance, passive_this_month)
             net_savings = max((corp_monthly_takehome + passive_this_month + other_income_monthly) - burn_rate, 0)
             proj_balance = proj_balance * (1 + monthly_total_return_rate) + net_savings
             if crossover_month is not None and i >= crossover_month + 12:
@@ -2924,37 +2915,6 @@ def generate_html(data: dict, ai_html: str | None = None,
     # Sustainability milestone (if already sustainable)
     if passive_income and burn_rate > 0 and combined_monthly >= burn_rate:
         timeline_events.append((datetime.now().date(), "\u2b50", "Sustainability Achieved", f"Combined income ({money(combined_monthly)}/mo) covers burn rate ({money(burn_rate)}/mo)", "#f28e2b"))
-
-    # Build Future Milestones card from coverage projections
-    future_milestones_section = ""
-    if coverage_milestones:
-        milestone_colors = {25: "#f39c12", 50: "#e67e22", 75: "#27ae60", 100: "#27ae60"}
-        milestone_icons = {25: "\U0001f3af", 50: "\U0001f3af", 75: "\U0001f3af", 100: "\u2b50"}
-        fm_rows = ""
-        for pct in sorted(coverage_milestones):
-            _mi, m_date, m_balance, m_passive = coverage_milestones[pct]
-            icon = milestone_icons[pct]
-            color = milestone_colors[pct]
-            date_str = m_date.strftime("%b %Y")
-            fm_rows += f"""
-            <tr>
-                <td style="font-size:1.3em;padding:12px 12px;vertical-align:top;text-align:center">{icon}</td>
-                <td style="padding:12px 16px 12px 8px">
-                    <div style="font-weight:600;color:{color};font-size:1.0em">{pct}% Passive Coverage</div>
-                    <div style="color:var(--muted);font-size:0.88em;margin-top:2px">
-                        <strong>{date_str}</strong> &mdash; Portfolio reaches {money(m_balance)}, generating {money(m_passive)}/mo (covers {pct}% of {money(burn_rate)}/mo burn rate)
-                    </div>
-                </td>
-            </tr>"""
-
-        future_milestones_section = f"""
-<section class="card">
-    <h2>Future Milestones</h2>
-    <p style="color:var(--muted);font-style:italic;margin-bottom:10px">Projected coverage targets based on current yield, growth rate, and burn rate.</p>
-    <table style="width:100%;border-collapse:separate;border-spacing:0">
-        <tbody>{fm_rows}</tbody>
-    </table>
-</section>"""
 
     def _to_date(d):
         return d.date() if isinstance(d, datetime) else d
@@ -3286,7 +3246,7 @@ def generate_html(data: dict, ai_html: str | None = None,
     if corporate_income or passive_income or incoming_etransfers or bank_interest:
         income_tab_btn = '<button data-tab="tab-income">Income</button>'
     milestones_tab_btn = ''
-    if milestones_section or sustainability_card or future_milestones_section:
+    if milestones_section or sustainability_card:
         milestones_tab_btn = '<button data-tab="tab-milestones">Milestones</button>'
     ai_tab_btn = ''
     if ai_html:
@@ -3432,7 +3392,7 @@ canvas {{ max-width: 100%; }}
 </div>
 
 <!-- ═══ MILESTONES ═══ -->
-{'<div class="tab-panel" id="tab-milestones">' + sustainability_card + future_milestones_section + milestones_section + '</div>' if (milestones_section or sustainability_card or future_milestones_section) else ''}
+{'<div class="tab-panel" id="tab-milestones">' + sustainability_card + milestones_section + '</div>' if (milestones_section or sustainability_card) else ''}
 
 <!-- ═══ AI RECOMMENDATIONS ═══ -->
 {'<div class="tab-panel" id="tab-ai">' + ai_section + '</div>' if ai_html else ''}
