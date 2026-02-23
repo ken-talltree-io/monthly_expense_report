@@ -844,9 +844,11 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
             "return_pct": simple_return,
             "return_source": "estimated",
             "dividends_annual": None,
+            "balance_history": [],
         }
 
         # Parse dividends + interest from ALL monthly statements for this account
+        # Also extract balance history (balance, deposits, withdrawals) per month
         total_income = 0.0
         months_seen = set()
         for ds, fp in files:
@@ -864,10 +866,48 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                 monthly_income += float(int_m.group(1).replace(",", ""))
             total_income += monthly_income
 
+            # Extract balance history entry for this month
+            bh_m = re.search(
+                r"Total Portfolio\s+\$([0-9,]+\.\d{2})\s+100\.00",
+                pdf_text,
+            )
+            if bh_m:
+                hist_bal = float(bh_m.group(1).replace(",", ""))
+                # USD conversion using this statement's fx rate
+                if is_usd:
+                    hist_fx = re.search(r"\$1 USD = \$([0-9.]+) CAD", pdf_text)
+                    if hist_fx:
+                        hist_fx_rate = float(hist_fx.group(1))
+                        hist_bal = round(hist_bal * hist_fx_rate, 2)
+                    else:
+                        continue  # Can't convert; skip this month
+
+                # Parse deposits and withdrawals (first match = CAD column)
+                dep_m = re.search(r"Deposits\s+\$([\d,]+\.\d{2})", pdf_text)
+                wdr_m = re.search(r"Withdrawals\s+\$([\d,]+\.\d{2})", pdf_text)
+                hist_dep = float(dep_m.group(1).replace(",", "")) if dep_m else 0.0
+                hist_wdr = float(wdr_m.group(1).replace(",", "")) if wdr_m else 0.0
+
+                # Parse statement end date
+                hist_dm = re.search(
+                    r"(\d{4}-\d{2}-\d{2})\s*-\s*(\d{4}-\d{2}-\d{2})", pdf_text
+                )
+                hist_date = hist_dm.group(2) if hist_dm else ds
+
+                results[suffix]["balance_history"].append({
+                    "date": hist_date,
+                    "balance": hist_bal,
+                    "deposits": hist_dep,
+                    "withdrawals": hist_wdr,
+                })
+
         if months_seen and total_income > 0:
             results[suffix]["dividends_annual"] = round(
                 total_income / len(months_seen) * 12, 2
             )
+
+        # Sort balance history chronologically
+        results[suffix]["balance_history"].sort(key=lambda x: x["date"])
 
     # ── Steadyhand (consolidated quarterly PDFs) ────────────────────────────
     sh_dir = os.path.join(stmt_dir, "personal", "Steadyhand")
@@ -895,6 +935,30 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
 
         if sh_pdfs:
             sh_pdfs.sort(reverse=True)
+
+            # Collect balance history from ALL quarterly PDFs
+            sh_balance_history: dict[str, list] = defaultdict(list)
+            for sort_key, q_pdf in sh_pdfs:
+                q_text = _pdf_text(q_pdf)
+                if not q_text:
+                    continue
+                sk_year, sk_month = sort_key // 100, sort_key % 100
+                iso_date = f"{sk_year}-{sk_month:02d}-28"
+                for row_m in re.finditer(
+                    r"^(\d{7})\s+.+?\s+([\d,]+\.\d{2})\s*$",
+                    q_text, re.MULTILINE,
+                ):
+                    acct_num = row_m.group(1)
+                    bal = float(row_m.group(2).replace(",", ""))
+                    if bal > 0:
+                        sh_balance_history[acct_num].append({
+                            "date": iso_date,
+                            "balance": bal,
+                            "deposits": 0.0,
+                            "withdrawals": 0.0,
+                        })
+
+            # Use latest PDF for current balance, returns, and dividends
             _, latest_pdf = sh_pdfs[0]
             text = _pdf_text(latest_pdf)
 
@@ -912,12 +976,15 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                     balance = float(row_m.group(2).replace(",", ""))
                     if balance <= 0:
                         continue
+                    history = sh_balance_history.get(acct_num, [])
+                    history.sort(key=lambda x: x["date"])
                     results[acct_num] = {
                         "balance": balance,
                         "date": stmt_date,
                         "source": "Steadyhand statement",
                         "return_pct": None,
                         "dividends_annual": None,
+                        "balance_history": history,
                     }
 
                 # Parse per-account 1-year returns (first match per account wins)
@@ -1263,6 +1330,7 @@ def extract_passive_income(folder: str, source: str = "csv") -> dict | None:
                 "start_date": start_date,
                 "balance_source": balance_source,
                 "statement_date": statement_date,
+                "balance_history": stmt.get("balance_history", []) if stmt else [],
             }
 
             # Route to appropriate bucket
@@ -1302,6 +1370,89 @@ def extract_passive_income(folder: str, source: str = "csv") -> dict | None:
         "corporate_balance": round(corporate_balance, 2),
         "property_accounts": property_accts,
         "property_balance": round(property_balance, 2),
+    }
+
+
+def compute_empirical_growth_rate(passive_income: dict) -> dict | None:
+    """Compute weighted-average empirical monthly total return from account histories.
+
+    Uses balance_history from statement data to compute actual observed growth,
+    adjusting for deposits/withdrawals to isolate investment returns.
+    Returns None if fewer than 3 data points are available.
+    """
+    all_accounts = passive_income.get("accounts", []) + passive_income.get("registered_accounts", [])
+    per_account = []
+    total_data_points = 0
+    all_dates = []
+
+    for acct in all_accounts:
+        history = acct.get("balance_history", [])
+        if len(history) < 2:
+            continue
+
+        monthly_returns = []
+        balances = []
+        for i in range(1, len(history)):
+            t0 = history[i - 1]
+            t1 = history[i]
+            b0 = t0["balance"]
+            b1 = t1["balance"]
+            if b0 <= 0:
+                continue
+
+            net_flow = t1["deposits"] - t1["withdrawals"]
+            investment_return = b1 - b0 - net_flow
+            period_return = investment_return / b0
+
+            # Determine months in period from date gap
+            try:
+                d0 = datetime.strptime(t0["date"][:10], "%Y-%m-%d")
+                d1 = datetime.strptime(t1["date"][:10], "%Y-%m-%d")
+                months_in_period = max(round((d1 - d0).days / 30.44), 1)
+            except (ValueError, TypeError):
+                months_in_period = 1
+
+            # Convert period return to monthly return
+            if period_return > -1:
+                monthly_return = (1 + period_return) ** (1 / months_in_period) - 1
+            else:
+                monthly_return = -1.0  # total loss
+
+            monthly_returns.append(monthly_return)
+            balances.append((b0 + b1) / 2)
+            all_dates.append(t0["date"][:10])
+            all_dates.append(t1["date"][:10])
+
+        if monthly_returns:
+            avg_return = sum(monthly_returns) / len(monthly_returns)
+            avg_balance = sum(balances) / len(balances)
+            per_account.append({
+                "account": acct["account"],
+                "monthly_return": avg_return,
+                "avg_balance": avg_balance,
+                "data_points": len(monthly_returns),
+            })
+            total_data_points += len(monthly_returns)
+
+    if total_data_points < 3:
+        return None
+
+    # Weighted average by balance
+    weighted_sum = sum(pa["monthly_return"] * pa["avg_balance"] for pa in per_account)
+    weight_total = sum(pa["avg_balance"] for pa in per_account)
+    if weight_total <= 0:
+        return None
+
+    monthly_rate = weighted_sum / weight_total
+    annualized = (1 + monthly_rate) ** 12 - 1
+
+    all_dates.sort()
+    return {
+        "monthly_growth_rate": monthly_rate,
+        "annualized_rate": annualized,
+        "data_points": total_data_points,
+        "date_range": (all_dates[0], all_dates[-1]) if all_dates else ("", ""),
+        "per_account": per_account,
     }
 
 
@@ -1686,7 +1837,8 @@ def analyze(transactions: list[dict], transfers: dict | None = None,
 def get_ai_recommendations(data: dict, passive_income: dict | None = None,
                            corporate_income: dict | None = None,
                            incoming_etransfers: list | None = None,
-                           bank_interest: list | None = None) -> str | None:
+                           bank_interest: list | None = None,
+                           notes: dict | None = None) -> str | None:
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         print("Error: ANTHROPIC_API_KEY environment variable not set.")
@@ -1717,6 +1869,10 @@ def get_ai_recommendations(data: dict, passive_income: dict | None = None,
         "fixed_total": data.get("fixed_total", 0),
         "discretionary_total": data.get("discretionary_total", 0),
     }
+
+    # User-provided notes explaining known anomalies
+    if notes:
+        summary["user_notes"] = {merchant: note for merchant, note in notes.items()}
 
     # Passive investment income — per-account detail for portfolio-specific advice
     if passive_income:
@@ -1896,7 +2052,7 @@ def get_ai_recommendations(data: dict, passive_income: dict | None = None,
 
     prompt = f"""Analyze this personal & corporate financial dashboard and provide actionable recommendations.
 
-Context: This dashboard covers a self-employed consultant pursuing financial sustainability, defined as: passive income >= burn rate. Income comes from three streams: (1) passive portfolio yield from personal investments — this is the SUSTAINABLE income, (2) corporate consulting revenue (Tall Tree Technology) at ~60% take-home after tax/expenses — this is ACTIVE income that bridges the gap, and (3) corporate dividend income (Britton Holdings). The "burn_rate_coverage" section shows how much of the burn rate is covered by passive income alone — coverage_pct is passive-only. Corporate income bridges the remaining gap but is not considered sustainable. "accessible_savings" is the total balance in Non-registered, Cash, and TFSA accounts that can be drawn without tax penalty; "runway_months" shows how long savings last if all income stopped (null if passive income already covers expenses). Revenue trend shows month-over-month changes in consulting income. "debts_paid_off" lists debts that were fully eliminated during this period (with per-debt principal and payoff dates) — these are no longer owed and should be celebrated, not treated as outstanding obligations. "corporate_income.milestones" shows the corporate journey timeline (launch date, first revenue, first dividend). The spending data includes fixed costs (tuition, car payment, utilities) and discretionary spending across credit and debit cards. The "passive_income.accounts" array contains per-account detail (name, type, balance, annual_yield, return_pct) for accessible accounts and RRSP accounts — use this to identify underperforming or overconcentrated positions. The "passive_income.net_worth" object shows the full balance breakdown across accessible, RRSP, corporate, property, and RESP holdings. Each category includes a "monthly" object with per-month spending for the last 6 months — use this to spot categories trending up or down.
+Context: This dashboard covers a self-employed consultant pursuing financial sustainability, defined as: passive income >= burn rate. Income comes from three streams: (1) passive portfolio yield from personal investments — this is the SUSTAINABLE income, (2) corporate consulting revenue (Tall Tree Technology) at ~60% take-home after tax/expenses — this is ACTIVE income that bridges the gap, and (3) corporate dividend income (Britton Holdings). The "burn_rate_coverage" section shows how much of the burn rate is covered by passive income alone — coverage_pct is passive-only. Corporate income bridges the remaining gap but is not considered sustainable. "accessible_savings" is the total balance in Non-registered, Cash, and TFSA accounts that can be drawn without tax penalty; "runway_months" shows how long savings last if all income stopped (null if passive income already covers expenses). Revenue trend shows month-over-month changes in consulting income. "debts_paid_off" lists debts that were fully eliminated during this period (with per-debt principal and payoff dates) — these are no longer owed and should be celebrated, not treated as outstanding obligations. "corporate_income.milestones" shows the corporate journey timeline (launch date, first revenue, first dividend). The spending data includes fixed costs (tuition, car payment, utilities) and discretionary spending across credit and debit cards. The "passive_income.accounts" array contains per-account detail (name, type, balance, annual_yield, return_pct) for accessible accounts and RRSP accounts — use this to identify underperforming or overconcentrated positions. The "passive_income.net_worth" object shows the full balance breakdown across accessible, RRSP, corporate, property, and RESP holdings. Each category includes a "monthly" object with per-month spending for the last 6 months — use this to spot categories trending up or down. "user_notes" contains the user's own explanations for known spending anomalies (e.g. renovations, billing errors) — treat these as confirmed facts and do NOT flag explained spikes as concerns.
 
 DATA:
 {json.dumps(summary, indent=2)}
@@ -2441,13 +2597,24 @@ def generate_html(data: dict, ai_html: str | None = None,
     # ── Sustainability Projection ──
     sustainability_card = ""
     sustainability_chart_js = ""
+    coverage_milestones = {}
     if passive_income and accessible_balance > 0 and burn_rate > 0:
         annual_income_proj = passive_income["annual_income"]
         annual_growth_proj = passive_income.get("annual_growth", 0)
         annual_yield_rate = annual_income_proj / accessible_balance if accessible_balance else 0
         annual_total_return_rate = (annual_income_proj + annual_growth_proj) / accessible_balance if accessible_balance else 0
         monthly_yield_rate = annual_yield_rate / 12
-        monthly_total_return_rate = annual_total_return_rate / 12
+
+        # Use empirical growth rate if available (>= 3 data points), else fall back to CSV rates
+        empirical = passive_income.get("empirical_growth")
+        if empirical and empirical["data_points"] >= 3:
+            monthly_total_return_rate = empirical["monthly_growth_rate"]
+            empirical_annualized = empirical["annualized_rate"]
+            using_empirical = True
+        else:
+            monthly_total_return_rate = annual_total_return_rate / 12
+            empirical_annualized = None
+            using_empirical = False
         total_monthly_income = corp_monthly_takehome + monthly_passive + other_income_monthly
 
         proj_balance = accessible_balance
@@ -2458,6 +2625,7 @@ def generate_html(data: dict, ai_html: str | None = None,
         already_sustainable = (monthly_passive >= burn_rate)
         now = datetime.now()
         max_months = 120
+        coverage_milestones = {}  # {pct: (month_idx, date, balance, passive_income)}
 
         for i in range(max_months):
             m_date = datetime(now.year, now.month, 1) + timedelta(days=32 * i)
@@ -2468,6 +2636,12 @@ def generate_html(data: dict, ai_html: str | None = None,
             proj_burn.append(round(burn_rate, 2))
             if crossover_month is None and passive_this_month >= burn_rate and i > 0:
                 crossover_month = i
+            # Track intermediate coverage milestones
+            if i > 0 and burn_rate > 0:
+                pct = passive_this_month / burn_rate * 100
+                for threshold in (25, 50, 75, 100):
+                    if threshold not in coverage_milestones and pct >= threshold:
+                        coverage_milestones[threshold] = (i, m_date.date(), proj_balance, passive_this_month)
             net_savings = max((corp_monthly_takehome + passive_this_month + other_income_monthly) - burn_rate, 0)
             proj_balance = proj_balance * (1 + monthly_total_return_rate) + net_savings
             if crossover_month is not None and i >= crossover_month + 12:
@@ -2501,10 +2675,21 @@ def generate_html(data: dict, ai_html: str | None = None,
         point_radius_json = json.dumps(point_radius)
         point_bg_json = json.dumps(point_bg)
 
+        if using_empirical:
+            d0 = datetime.strptime(empirical["date_range"][0], "%Y-%m-%d").strftime("%b %Y")
+            d1 = datetime.strptime(empirical["date_range"][1], "%Y-%m-%d").strftime("%b %Y")
+            proj_desc = (
+                f"Empirical total return: {empirical_annualized*100:.1f}%/yr "
+                f"(observed {d0} \u2013 {d1}, {empirical['data_points']} data points), "
+                f"{annual_yield_rate*100:.1f}% yield, ${burn_rate:,.0f}/mo burn rate."
+            )
+        else:
+            proj_desc = f"Assuming {annual_yield_rate*100:.1f}% yield, {annual_total_return_rate*100:.1f}% total return, ${burn_rate:,.0f}/mo burn rate."
+
         sustainability_card = f"""
     <div class="card" style="margin-bottom:20px">
         <h2>Sustainability Projection</h2>
-        <p style="color:var(--muted);font-style:italic;margin-bottom:10px">Forward projection assuming {annual_yield_rate*100:.1f}% yield, {annual_total_return_rate*100:.1f}% total return, and ${burn_rate:,.0f}/mo burn rate.</p>
+        <p style="color:var(--muted);font-style:italic;margin-bottom:10px">{proj_desc}</p>
         {summary_html}
         <div class="chart-container">
             <canvas id="sustainabilityChart" height="100"></canvas>
@@ -2739,6 +2924,37 @@ def generate_html(data: dict, ai_html: str | None = None,
     # Sustainability milestone (if already sustainable)
     if passive_income and burn_rate > 0 and combined_monthly >= burn_rate:
         timeline_events.append((datetime.now().date(), "\u2b50", "Sustainability Achieved", f"Combined income ({money(combined_monthly)}/mo) covers burn rate ({money(burn_rate)}/mo)", "#f28e2b"))
+
+    # Build Future Milestones card from coverage projections
+    future_milestones_section = ""
+    if coverage_milestones:
+        milestone_colors = {25: "#f39c12", 50: "#e67e22", 75: "#27ae60", 100: "#27ae60"}
+        milestone_icons = {25: "\U0001f3af", 50: "\U0001f3af", 75: "\U0001f3af", 100: "\u2b50"}
+        fm_rows = ""
+        for pct in sorted(coverage_milestones):
+            _mi, m_date, m_balance, m_passive = coverage_milestones[pct]
+            icon = milestone_icons[pct]
+            color = milestone_colors[pct]
+            date_str = m_date.strftime("%b %Y")
+            fm_rows += f"""
+            <tr>
+                <td style="font-size:1.3em;padding:12px 12px;vertical-align:top;text-align:center">{icon}</td>
+                <td style="padding:12px 16px 12px 8px">
+                    <div style="font-weight:600;color:{color};font-size:1.0em">{pct}% Passive Coverage</div>
+                    <div style="color:var(--muted);font-size:0.88em;margin-top:2px">
+                        <strong>{date_str}</strong> &mdash; Portfolio reaches {money(m_balance)}, generating {money(m_passive)}/mo (covers {pct}% of {money(burn_rate)}/mo burn rate)
+                    </div>
+                </td>
+            </tr>"""
+
+        future_milestones_section = f"""
+<section class="card">
+    <h2>Future Milestones</h2>
+    <p style="color:var(--muted);font-style:italic;margin-bottom:10px">Projected coverage targets based on current yield, growth rate, and burn rate.</p>
+    <table style="width:100%;border-collapse:separate;border-spacing:0">
+        <tbody>{fm_rows}</tbody>
+    </table>
+</section>"""
 
     def _to_date(d):
         return d.date() if isinstance(d, datetime) else d
@@ -3070,7 +3286,7 @@ def generate_html(data: dict, ai_html: str | None = None,
     if corporate_income or passive_income or incoming_etransfers or bank_interest:
         income_tab_btn = '<button data-tab="tab-income">Income</button>'
     milestones_tab_btn = ''
-    if milestones_section:
+    if milestones_section or sustainability_card or future_milestones_section:
         milestones_tab_btn = '<button data-tab="tab-milestones">Milestones</button>'
     ai_tab_btn = ''
     if ai_html:
@@ -3172,7 +3388,6 @@ canvas {{ max-width: 100%; }}
 <div class="tab-panel active" id="tab-big-picture">
 <div id="overview"></div>
 {hero_card}
-{sustainability_card}
 {net_worth_card}
 <div class="stats">
     {overview_stats}
@@ -3217,7 +3432,7 @@ canvas {{ max-width: 100%; }}
 </div>
 
 <!-- ═══ MILESTONES ═══ -->
-{'<div class="tab-panel" id="tab-milestones">' + milestones_section + '</div>' if milestones_section else ''}
+{'<div class="tab-panel" id="tab-milestones">' + sustainability_card + future_milestones_section + milestones_section + '</div>' if (milestones_section or sustainability_card or future_milestones_section) else ''}
 
 <!-- ═══ AI RECOMMENDATIONS ═══ -->
 {'<div class="tab-panel" id="tab-ai">' + ai_section + '</div>' if ai_html else ''}
@@ -3303,6 +3518,7 @@ def main():
     parser = argparse.ArgumentParser(description="Financial Dashboard & Subscription Auditor")
     parser.add_argument("--path", default=".", help="Folder containing CSV files (default: current directory)")
     parser.add_argument("--ai", action="store_true", help="Generate AI-powered recommendations (requires ANTHROPIC_API_KEY)")
+    parser.add_argument("--no-ai", action="store_true", help="Skip AI recommendations even if cached")
     parser.add_argument("--source", choices=["csv", "statements"], default="csv",
                         help="Financial data source: csv (portfolio.csv) or statements (PDF statements)")
     args = parser.parse_args()
@@ -3359,6 +3575,15 @@ def main():
     passive_income = extract_passive_income(folder, source=args.source)
     if passive_income:
         print(f"Portfolio passive income ({args.source}): ${passive_income['annual_income']:,.2f}/year (${passive_income['monthly_income']:,.2f}/month) from {len(passive_income['accounts'])} accounts")
+        empirical = compute_empirical_growth_rate(passive_income)
+        if empirical:
+            passive_income["empirical_growth"] = empirical
+            print(f"Empirical monthly growth rate: {empirical['monthly_growth_rate']*100:.3f}% ({empirical['annualized_rate']*100:.1f}%/yr, {empirical['data_points']} data points, {empirical['date_range'][0]} to {empirical['date_range'][1]})")
+            for pa in sorted(empirical["per_account"], key=lambda x: x["avg_balance"], reverse=True):
+                ann = (1 + pa["monthly_return"]) ** 12 - 1
+                print(f"  {pa['account']:40s}  {pa['monthly_return']*100:+.3f}%/mo  {ann*100:+.1f}%/yr  avg ${pa['avg_balance']:>12,.0f}  ({pa['data_points']} pts)")
+        else:
+            print("Empirical growth: insufficient data (< 3 data points), using CSV rates")
 
     # Extract corporate income from corporate accounts
     corporate_income = extract_corporate_income(folder)
@@ -3372,12 +3597,24 @@ def main():
     if data.get("fixed_cost_detail"):
         print(f"Fixed costs: ${data['fixed_total']:,.2f} | Discretionary: ${data['discretionary_total']:,.2f}")
 
+    ai_cache_path = os.path.join(folder, ".ai_cache.html")
     ai_html = None
-    if args.ai:
+    if args.no_ai:
+        pass
+    elif args.ai:
         ai_html = get_ai_recommendations(data, passive_income=passive_income,
                                           corporate_income=corporate_income,
                                           incoming_etransfers=incoming_etransfers,
-                                          bank_interest=bank_interest)
+                                          bank_interest=bank_interest,
+                                          notes=user_notes)
+        if ai_html:
+            with open(ai_cache_path, "w", encoding="utf-8") as f:
+                f.write(ai_html)
+            print(f"AI recommendations cached to {ai_cache_path}")
+    elif os.path.exists(ai_cache_path):
+        with open(ai_cache_path, "r", encoding="utf-8") as f:
+            ai_html = f.read()
+        print("Loaded cached AI recommendations (use --no-ai to skip, --ai to refresh)")
 
     html = generate_html(data, ai_html, notes=user_notes, budgets=user_budgets,
                          passive_income=passive_income,
