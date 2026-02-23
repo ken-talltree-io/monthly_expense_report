@@ -1855,7 +1855,8 @@ Format your response in clean HTML as a single <ol> list with at most 5 <li> ite
 def generate_html(data: dict, ai_html: str | None = None,
                    notes: dict | None = None, budgets: dict | None = None,
                    passive_income: dict | None = None,
-                   corporate_income: dict | None = None) -> str:
+                   corporate_income: dict | None = None,
+                   folder: str = ".") -> str:
     notes = notes or {}
     budgets = budgets or {}
     months = data["months"]
@@ -2016,6 +2017,38 @@ def generate_html(data: dict, ai_html: str | None = None,
             <td style="text-align:right">{money(s['avg'])}</td>
             {month_cells}
         </tr>"""
+
+    # Interac e-Transfer detail table (grouped by month, sorted by date)
+    etransfer_txns = sorted(
+        [t for txns in data["monthly_txns"].values() for t in txns if t["merchant"] == "Interac e-Transfer"],
+        key=lambda t: t["date"], reverse=True
+    )
+    etransfer_total = sum(t["amount"] for t in etransfer_txns)
+    # Load e-transfer annotations (date+amount -> note)
+    etransfer_notes = {}
+    notes_path = os.path.join(folder, "etransfer-notes.csv")
+    if os.path.exists(notes_path):
+        with open(notes_path, newline="") as f:
+            for row in csv.DictReader(f):
+                key = (row["date"], row["amount"])
+                if row.get("note", "").strip():
+                    etransfer_notes[key] = row["note"].strip()
+    etransfer_by_month = {}
+    for t in etransfer_txns:
+        m = str(t["date"])[:7]
+        etransfer_by_month.setdefault(m, []).append(t)
+    etransfer_rows = ""
+    for m in sorted(etransfer_by_month, reverse=True):
+        txns = etransfer_by_month[m]
+        month_label = datetime.strptime(m, "%Y-%m").strftime("%b %Y")
+        month_total = sum(t["amount"] for t in txns)
+        etransfer_rows += f'<tr style="background:var(--bg);font-weight:600"><td colspan="2">{month_label}</td><td style="text-align:right">{money(month_total)}</td></tr>'
+        for t in txns:
+            date_str = str(t["date"])[:10]
+            amt_str = f'{t["amount"]:.2f}'
+            note = etransfer_notes.get((date_str, amt_str), "")
+            note_html = f'<span style="color:var(--muted);font-style:italic">{note}</span>' if note else ""
+            etransfer_rows += f'<tr><td>{date_str}</td><td>{note_html}</td><td style="text-align:right">{money(t["amount"])}</td></tr>'
 
     # Category table with sparklines and budget bars
     has_budgets = bool(budgets)
@@ -2246,7 +2279,7 @@ def generate_html(data: dict, ai_html: str | None = None,
     overview_stats = f"""
     <div class="stat"><div class="value">{money(adjusted_total)}</div><div class="label">Total Spend ({len(months)} months)</div></div>
     <div class="stat"><div class="value">{money(adjusted_avg)}</div><div class="label">Monthly Average</div></div>
-    <div class="stat"><div class="value" style="color:{trend_color}">{trend_arrow} {abs(data['mom_change']):.0f}%</div><div class="label">3-Month Trend</div></div>"""
+    <div class="stat"><div class="value" style="color:{trend_color}">{trend_arrow} {abs(data['mom_change']):.0f}%</div><div class="label">3-Mo Avg vs Prior 3-Mo</div></div>"""
     if debt_payoff_total > 0:
         overview_stats += f"""
     <div class="stat"><div class="value" style="color:#27ae60">{money(debt_payoff_total)}</div><div class="label">Debt Paid Off</div></div>"""
@@ -2668,6 +2701,8 @@ canvas {{ max-width: 100%; }}
     </table>
     </div>
 </section>
+
+{'<section id="interac-transfers" class="card"><h2>Interac e-Transfer Details</h2><p>All outgoing e-Transfers &mdash; ' + str(len(etransfer_txns)) + ' transactions totalling ' + money(etransfer_total) + '</p><table class="data-table"><thead><tr><th>Date</th><th>Note</th><th style="text-align:right">Amount</th></tr></thead><tbody>' + etransfer_rows + '</tbody></table></section>' if etransfer_txns else ''}
 </div>
 
 <!-- ═══ MILESTONES ═══ -->
@@ -2795,7 +2830,8 @@ def main():
 
     html = generate_html(data, ai_html, notes=user_notes, budgets=user_budgets,
                          passive_income=passive_income,
-                         corporate_income=corporate_income)
+                         corporate_income=corporate_income,
+                         folder=folder)
     output_path = os.path.join(folder, "dashboard.html")
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(html)
