@@ -1059,10 +1059,9 @@ def extract_passive_income(folder: str) -> dict | None:
     ACCESSIBLE_TYPES = {"Non-reg", "Cash", "TFSA"}  # spendable without tax penalty
 
     accessible = []
-    rrsp = []
+    registered = []  # RRSP + RESP
     corporate_accts = []
     property_accts = []
-    resp_accts = []
 
     # Parse statement balances (authoritative source for totals)
     stmt_balances = parse_statement_balances(folder)
@@ -1188,39 +1187,34 @@ def extract_passive_income(folder: str) -> dict | None:
                 corporate_accts.append(entry)
             elif asset_type == "Property":
                 property_accts.append(entry)
-            elif asset_type == "RESP":
-                resp_accts.append(entry)
+            elif asset_type in ("RRSP", "RESP"):
+                registered.append(entry)
             elif annual_yield > 0 and asset_type in ACCESSIBLE_TYPES:
                 accessible.append(entry)
-            elif annual_yield > 0 and asset_type == "RRSP":
-                rrsp.append(entry)
 
-    if not accessible and not rrsp and not corporate_accts and not property_accts and not resp_accts:
+    if not accessible and not registered and not corporate_accts and not property_accts:
         return None
 
     accessible_yield = sum(a["annual_yield"] for a in accessible)
-    rrsp_yield = sum(a["annual_yield"] for a in rrsp)
+    registered_yield = sum(a["annual_yield"] for a in registered)
     accessible_balance = sum(a["value"] for a in accessible)
-    rrsp_balance = sum(a["value"] for a in rrsp)
+    registered_balance = sum(a["value"] for a in registered)
     corporate_balance = sum(a["value"] for a in corporate_accts)
     property_balance = sum(a["value"] for a in property_accts)
-    resp_balance = sum(a["value"] for a in resp_accts)
 
     return {
         "annual_income": round(accessible_yield, 2),
         "monthly_income": round(accessible_yield / 12, 2) if accessible_yield else 0,
         "accounts": sorted(accessible, key=lambda a: a["annual_yield"], reverse=True),
         "accessible_balance": round(accessible_balance, 2),
-        "rrsp_annual": round(rrsp_yield, 2),
-        "rrsp_monthly": round(rrsp_yield / 12, 2) if rrsp_yield else 0,
-        "rrsp_accounts": sorted(rrsp, key=lambda a: a["annual_yield"], reverse=True),
-        "rrsp_balance": round(rrsp_balance, 2),
+        "registered_annual": round(registered_yield, 2),
+        "registered_monthly": round(registered_yield / 12, 2) if registered_yield else 0,
+        "registered_accounts": sorted(registered, key=lambda a: a["annual_yield"], reverse=True),
+        "registered_balance": round(registered_balance, 2),
         "corporate_accounts": corporate_accts,
         "corporate_balance": round(corporate_balance, 2),
         "property_accounts": property_accts,
         "property_balance": round(property_balance, 2),
-        "resp_accounts": resp_accts,
-        "resp_balance": round(resp_balance, 2),
     }
 
 
@@ -1589,21 +1583,20 @@ def get_ai_recommendations(data: dict, passive_income: dict | None = None,
                  "return_pct": round(a["annual_yield"] / a["value"] * 100, 2) if a["value"] else 0}
                 for a in passive_income["accounts"]
             ],
-            "rrsp_annual": passive_income.get("rrsp_annual", 0),
-            "rrsp_monthly": passive_income.get("rrsp_monthly", 0),
-            "rrsp_balance": passive_income.get("rrsp_balance", 0),
-            "rrsp_accounts": [
+            "registered_annual": passive_income.get("registered_annual", 0),
+            "registered_monthly": passive_income.get("registered_monthly", 0),
+            "registered_balance": passive_income.get("registered_balance", 0),
+            "registered_accounts": [
                 {"name": a["account"], "type": a["type"],
                  "balance": a["value"], "annual_yield": a["annual_yield"],
                  "return_pct": round(a["annual_yield"] / a["value"] * 100, 2) if a["value"] else 0}
-                for a in passive_income.get("rrsp_accounts", [])
+                for a in passive_income.get("registered_accounts", [])
             ],
             "net_worth": {
                 "accessible": passive_income.get("accessible_balance", 0),
-                "rrsp": passive_income.get("rrsp_balance", 0),
+                "registered": passive_income.get("registered_balance", 0),
                 "corporate": passive_income.get("corporate_balance", 0),
                 "property": passive_income.get("property_balance", 0),
-                "resp": passive_income.get("resp_balance", 0),
             },
         }
 
@@ -1948,8 +1941,8 @@ def generate_html(data: dict, ai_html: str | None = None,
     # ── Income vs burn rate (the main story) ──
     monthly_passive = passive_income["monthly_income"] if passive_income else 0
     annual_passive = passive_income["annual_income"] if passive_income else 0
-    rrsp_monthly = passive_income["rrsp_monthly"] if passive_income else 0
-    rrsp_annual = passive_income["rrsp_annual"] if passive_income else 0
+    registered_monthly = passive_income["registered_monthly"] if passive_income else 0
+    registered_annual = passive_income["registered_annual"] if passive_income else 0
 
     # Corporate income components — trailing 3-month average (same window as burn rate)
     if corporate_income:
@@ -2047,11 +2040,10 @@ def generate_html(data: dict, ai_html: str | None = None,
     net_worth_card = ""
     if passive_income:
         nw_accessible = passive_income.get("accessible_balance", 0)
-        nw_rrsp = passive_income.get("rrsp_balance", 0)
+        nw_registered = passive_income.get("registered_balance", 0)
         nw_property = passive_income.get("property_balance", 0)
         nw_corporate = passive_income.get("corporate_balance", 0)
-        nw_resp = passive_income.get("resp_balance", 0)
-        nw_total = nw_accessible + nw_rrsp + nw_property + nw_corporate + nw_resp
+        nw_total = nw_accessible + nw_registered + nw_property + nw_corporate
 
         def fmt_compact(val):
             if val >= 1_000_000:
@@ -2067,8 +2059,8 @@ def generate_html(data: dict, ai_html: str | None = None,
                 <div style="font-size:1.4em;font-weight:600">{fmt_compact(nw_accessible)}</div>
             </div>
             <div style="flex:1;min-width:120px;text-align:center">
-                <div style="font-size:0.78em;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">RRSP</div>
-                <div style="font-size:1.4em;font-weight:600">{fmt_compact(nw_rrsp)}</div>
+                <div style="font-size:0.78em;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Registered</div>
+                <div style="font-size:1.4em;font-weight:600">{fmt_compact(nw_registered)}</div>
             </div>"""
         if nw_property > 0:
             nw_metrics += f"""
@@ -2082,12 +2074,6 @@ def generate_html(data: dict, ai_html: str | None = None,
                 <div style="font-size:0.78em;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Corporate</div>
                 <div style="font-size:1.4em;font-weight:600">{fmt_compact(nw_corporate)}</div>
             </div>"""
-        if nw_resp > 0:
-            nw_metrics += f"""
-            <div style="flex:1;min-width:120px;text-align:center">
-                <div style="font-size:0.78em;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">RESP</div>
-                <div style="font-size:1.4em;font-weight:600">{fmt_compact(nw_resp)}</div>
-            </div>"""
         nw_metrics += f"""
             <div style="flex:1;min-width:120px;text-align:center">
                 <div style="font-size:0.78em;color:var(--accent);text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Total</div>
@@ -2098,17 +2084,15 @@ def generate_html(data: dict, ai_html: str | None = None,
         nw_segments = []
         nw_colors = {
             "Accessible": "#4e79a7",
-            "RRSP": "#76b7b2",
+            "Registered": "#76b7b2",
             "Property": "#f28e2b",
             "Corporate": "#59a14f",
-            "RESP": "#e15759",
         }
         for label, val, color in [
             ("Accessible", nw_accessible, nw_colors["Accessible"]),
-            ("RRSP", nw_rrsp, nw_colors["RRSP"]),
+            ("Registered", nw_registered, nw_colors["Registered"]),
             ("Property", nw_property, nw_colors["Property"]),
             ("Corporate", nw_corporate, nw_colors["Corporate"]),
-            ("RESP", nw_resp, nw_colors["RESP"]),
         ]:
             if val > 0 and nw_total > 0:
                 pct = val / nw_total * 100
@@ -2122,10 +2106,9 @@ def generate_html(data: dict, ai_html: str | None = None,
         nw_legend_items = []
         for label, val, color in [
             ("Accessible", nw_accessible, nw_colors["Accessible"]),
-            ("RRSP", nw_rrsp, nw_colors["RRSP"]),
+            ("Registered", nw_registered, nw_colors["Registered"]),
             ("Property", nw_property, nw_colors["Property"]),
             ("Corporate", nw_corporate, nw_colors["Corporate"]),
-            ("RESP", nw_resp, nw_colors["RESP"]),
         ]:
             if val > 0:
                 nw_legend_items.append(
@@ -2274,7 +2257,8 @@ def generate_html(data: dict, ai_html: str | None = None,
             return (f"<td style='text-align:right'>{pct:.1f}%"
                     f"<br><span style='font-size:0.75em;color:var(--muted)'>{note}</span></td>")
         else:
-            return f"<td style='text-align:right'>{pct:.1f}%</td>"
+            return (f"<td style='text-align:right;font-style:italic'>{pct:.1f}%"
+                    f"<br><span style='font-size:0.75em;color:#e67e22'>csv</span></td>")
 
     def yield_cell(a: dict, heatmap_bg: str) -> str:
         """Render a yield <td> with source annotation and heatmap."""
@@ -2333,24 +2317,24 @@ def generate_html(data: dict, ai_html: str | None = None,
             )
         acc_unrealized = sum(g for g in acc_gaps if g < 0)
 
-        # RRSP accounts table (optional)
-        rrsp_html = ""
-        if passive_income.get("rrsp_accounts"):
-            rrsp_avg_return = (passive_income['rrsp_annual'] / passive_income['rrsp_balance'] * 100) if passive_income['rrsp_balance'] else 0
-            # Sort RRSP accounts by yield gap (outperformers first)
-            rrsp_sorted = sorted(passive_income["rrsp_accounts"],
-                                 key=lambda a: a['annual_yield'] - a['value'] * rrsp_avg_return / 100,
+        # Registered accounts table (RRSP + RESP — TFSAs are in Accessible)
+        reg_html = ""
+        if passive_income.get("registered_accounts"):
+            reg_avg_return = (passive_income['registered_annual'] / passive_income['registered_balance'] * 100) if passive_income['registered_balance'] else 0
+            # Sort registered accounts by yield gap (outperformers first)
+            reg_sorted = sorted(passive_income["registered_accounts"],
+                                 key=lambda a: a['annual_yield'] - a['value'] * reg_avg_return / 100,
                                  reverse=True)
-            rrsp_rows = ""
-            rrsp_gaps = []
-            rrsp_yields = [a['annual_yield'] for a in rrsp_sorted]
-            rrsp_max_yield = max(rrsp_yields) if rrsp_yields else 1
-            for a in rrsp_sorted:
-                intensity = a['annual_yield'] / rrsp_max_yield if rrsp_max_yield else 0
+            reg_rows = ""
+            reg_gaps = []
+            reg_yields = [a['annual_yield'] for a in reg_sorted]
+            reg_max_yield = max(reg_yields) if reg_yields else 1
+            for a in reg_sorted:
+                intensity = a['annual_yield'] / reg_max_yield if reg_max_yield else 0
                 heatmap_bg = f"rgba(39, 174, 96, {intensity * 0.35:.2f})"
-                expected_yield = a['value'] * rrsp_avg_return / 100
+                expected_yield = a['value'] * reg_avg_return / 100
                 gap = a['annual_yield'] - expected_yield
-                rrsp_gaps.append(gap)
+                reg_gaps.append(gap)
                 # Check if position is new (< 6 months old)
                 new_badge = ""
                 if a.get('start_date'):
@@ -2360,27 +2344,27 @@ def generate_html(data: dict, ai_html: str | None = None,
                         label = f"{age_months} mo" if age_months > 0 else "< 1 mo"
                         new_badge = f"<br><span style='font-size:0.8em;color:var(--muted)'>est. {label} ago — monitor</span>"
                 if gap >= 0:
-                    gap_cell = f"<td style='text-align:right;color:#27ae60'>✅ +{money(abs(gap))}/yr</td>"
+                    gap_cell = f"<td style='text-align:right;color:#27ae60'>+{money(abs(gap))}/yr</td>"
                 else:
-                    gap_cell = f"<td style='text-align:right;color:#e67e22'>⚠️ −{money(abs(gap))}/yr{new_badge}</td>"
-                rrsp_rows += (
+                    gap_cell = f"<td style='text-align:right;color:#e67e22'>-{money(abs(gap))}/yr{new_badge}</td>"
+                reg_rows += (
                     f"<tr><td>{a['account']}</td><td>{a.get('brokerage','')}</td><td>{a['type']}</td>"
                     f"{balance_cell(a)}"
                     f"{return_cell(a)}"
                     f"{yield_cell(a, heatmap_bg)}"
                     f"{gap_cell}</tr>"
                 )
-            rrsp_unrealized = sum(g for g in rrsp_gaps if g < 0)
-            rrsp_unrealized_row = f'<tr style="color:#e67e22"><td colspan="6">Unrealized</td><td style="text-align:right">−{money(abs(rrsp_unrealized))}/yr (−{money(abs(rrsp_unrealized) / 12)}/mo)</td></tr>' if rrsp_unrealized < 0 else ""
-            rrsp_html = f"""
-    <h3 style="margin-top:30px">RRSP Accounts <span style="font-weight:400;color:var(--muted);font-size:0.85em">(tax-sheltered — not accessible without penalty)</span></h3>
+            reg_unrealized = sum(g for g in reg_gaps if g < 0)
+            reg_unrealized_row = f'<tr style="color:#e67e22"><td colspan="6">Unrealized</td><td style="text-align:right">-{money(abs(reg_unrealized))}/yr (-{money(abs(reg_unrealized) / 12)}/mo)</td></tr>' if reg_unrealized < 0 else ""
+            reg_html = f"""
+    <h3 style="margin-top:30px">Registered Accounts <span style="font-weight:400;color:var(--muted);font-size:0.85em">(RRSP, RESP — not accessible without tax penalty)</span></h3>
     <table class="data-table" style="max-width:100%">
         <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Annual Yield</th><th style="text-align:right">vs Avg</th></tr></thead>
-        <tbody>{rrsp_rows}</tbody>
+        <tbody>{reg_rows}</tbody>
         <tfoot>
-            <tr style="font-weight:700"><td colspan="3">Total RRSP</td><td style="text-align:right">{money(passive_income['rrsp_balance'])}</td><td style="text-align:right">{rrsp_avg_return:.1f}%</td><td style="text-align:right">{money(passive_income['rrsp_annual'])}</td><td></td></tr>
-            <tr style="color:var(--muted)"><td colspan="6">Monthly Income</td><td style="text-align:right">{money(passive_income['rrsp_monthly'])}</td></tr>
-            {rrsp_unrealized_row}
+            <tr style="font-weight:700"><td colspan="3">Total Registered</td><td style="text-align:right">{money(passive_income['registered_balance'])}</td><td style="text-align:right">{reg_avg_return:.1f}%</td><td style="text-align:right">{money(passive_income['registered_annual'])}</td><td></td></tr>
+            <tr style="color:var(--muted)"><td colspan="6">Monthly Income</td><td style="text-align:right">{money(passive_income['registered_monthly'])}</td></tr>
+            {reg_unrealized_row}
         </tfoot>
     </table>"""
 
@@ -2398,7 +2382,7 @@ def generate_html(data: dict, ai_html: str | None = None,
             {'<tr style="color:#e67e22"><td colspan="6">Unrealized</td><td style="text-align:right">−' + money(abs(acc_unrealized)) + '/yr (−' + money(abs(acc_unrealized) / 12) + '/mo)</td></tr>' if acc_unrealized < 0 else ""}
         </tfoot>
     </table>
-    {rrsp_html}
+    {reg_html}
 </section>"""
 
     # ── Income chart section (removed — not useful) ──
