@@ -20,7 +20,7 @@ import ssl
 import subprocess
 import sys
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -30,7 +30,7 @@ MERCHANT_ALIASES = {
     "AMAZON.CA": "Amazon",
     "AMZN MKTP CA": "Amazon",
     "AMAZON.CA PRIME": "Amazon Prime",
-    "APPLE.COM/BILL": "Apple Subscriptions",
+    "APPLE.COM/BILL": "Apple Media",
     "APPLE.COM/CA": "Apple Store",
     "NETFLIX": "Netflix",
     "DISNEY PLUS": "Disney+",
@@ -361,7 +361,7 @@ CATEGORY_RULES = [
     ]),
     ("Streaming & Subscriptions", [
         "Netflix", "Disney+", "Bell Media", "Sportsnet NOW", "MUBI",
-        "Apple Subscriptions", "Amazon Prime", "Open Heart Project",
+        "Amazon Prime", "Open Heart Project",
         "Brief Media", "Stratechery",
         "OpenAI", "Cursor IDE", "Frontend Masters", "Resume.io",
         "Claude AI", "Nvidia",
@@ -421,7 +421,7 @@ CATEGORY_RULES = [
         "Scotiabank Insurance",
     ]),
     ("Entertainment", [
-        "Ticketmaster", "SeatGeek", "Eventbrite", "Cineplex",
+        "Apple Media", "Ticketmaster", "SeatGeek", "Eventbrite", "Cineplex",
         "Scandinave Spa", "Butchart Gardens", "Candytopia", "Capri Valley",
         "Spirit Halloween", "Games On The Drive", "Got Craft",
         "Red Horses Gallery", "Mosaic Books", "International Travel Maps",
@@ -1527,10 +1527,13 @@ def analyze(transactions: list[dict], transfers: dict | None = None,
         "Kids & Education", "Donations",
     }
 
+    # Merchants that look like subscriptions but aren't (consistent price, recurring use)
+    NOT_SUBSCRIPTIONS = ["shine auto wash", "amazon vancouver", "openai", "cursor", "stratechery", "false creek"]
+
     # Known service/subscription merchant keywords (always consider these)
     KNOWN_SUB_KEYWORDS = [
         "telus", "fido", "netflix", "disney", "bell media", "sportsnet",
-        "apple sub", "amazon prime", "mubi", "open heart", "brief media",
+        "amazon prime", "mubi", "open heart", "brief media",
     ]
 
     subscriptions = []
@@ -1551,12 +1554,15 @@ def analyze(transactions: list[dict], transfers: dict | None = None,
         avg_charges = sum(merchant_monthly_counts[merchant][m] for m in present_months) / len(present_months)
 
         cat = merchant_categories.get(merchant, "Uncategorized")
+        is_excluded = any(kw in merchant.lower() for kw in NOT_SUBSCRIPTIONS)
         is_known_sub = any(kw in merchant.lower() for kw in KNOWN_SUB_KEYWORDS)
         is_non_sub_category = cat in NON_SUB_CATEGORIES
 
         # Decision logic
         is_subscription = False
-        if is_known_sub:
+        if is_excluded:
+            pass
+        elif is_known_sub:
             # Always include known services regardless of consistency
             is_subscription = True
         elif is_non_sub_category:
@@ -1880,7 +1886,20 @@ Provide a MAXIMUM of 5 recommendations — no more than 5. Each should be specif
 - Subscription cost-saving actions (price increases to negotiate, services to cancel/downgrade)
 - Spending pattern optimizations (consolidation, alternatives)
 
-Format your response in clean HTML as a single <ol> list with at most 5 <li> items. Use <strong> for emphasis on merchant names and dollar amounts. Be concise — one short paragraph per recommendation."""
+Format your response in clean HTML as a single <ol> list with at most 5 <li> items. Use <strong> for emphasis on merchant names and dollar amounts. Be concise — one short paragraph per recommendation.
+
+IMPORTANT: On each <li>, include a data-sections attribute containing a comma-separated list of dashboard section IDs that the recommendation relates to. Use ONLY these IDs:
+- subscriptions — Subscription Audit
+- categories — Category Heatmap / spending categories
+- fixed-discretionary — Fixed vs Discretionary costs
+- corporate-income — Corporate Income
+- passive-income — Investment Portfolio
+- interac-transfers — Outgoing e-Transfers
+- incoming-etransfers — Incoming e-Transfers
+- bank-interest — Bank Interest
+- debt-freedom — Debt Freedom
+
+Example: <li data-sections="subscriptions,categories">Cancel Netflix...</li>"""
 
     payload = json.dumps({
         "model": "claude-sonnet-4-6",
@@ -2393,6 +2412,145 @@ def generate_html(data: dict, ai_html: str | None = None,
         </div>
     </div>"""
 
+    # ── Sustainability Projection ──
+    sustainability_card = ""
+    sustainability_chart_js = ""
+    if passive_income and accessible_balance > 0 and burn_rate > 0:
+        annual_income_proj = passive_income["annual_income"]
+        annual_growth_proj = passive_income.get("annual_growth", 0)
+        annual_yield_rate = annual_income_proj / accessible_balance if accessible_balance else 0
+        annual_total_return_rate = (annual_income_proj + annual_growth_proj) / accessible_balance if accessible_balance else 0
+        monthly_yield_rate = annual_yield_rate / 12
+        monthly_total_return_rate = annual_total_return_rate / 12
+        total_monthly_income = corp_monthly_takehome + monthly_passive + other_income_monthly
+
+        proj_balance = accessible_balance
+        proj_labels = []
+        proj_passive = []
+        proj_burn = []
+        crossover_month = None
+        already_sustainable = (monthly_passive >= burn_rate)
+        now = datetime.now()
+        max_months = 120
+
+        for i in range(max_months):
+            m_date = datetime(now.year, now.month, 1) + timedelta(days=32 * i)
+            m_date = m_date.replace(day=1)
+            proj_labels.append(m_date.strftime("%b %Y"))
+            passive_this_month = proj_balance * monthly_yield_rate
+            proj_passive.append(round(passive_this_month, 2))
+            proj_burn.append(round(burn_rate, 2))
+            if crossover_month is None and passive_this_month >= burn_rate and i > 0:
+                crossover_month = i
+            net_savings = max((corp_monthly_takehome + passive_this_month + other_income_monthly) - burn_rate, 0)
+            proj_balance = proj_balance * (1 + monthly_total_return_rate) + net_savings
+            if crossover_month is not None and i >= crossover_month + 12:
+                break
+
+        # Build summary line
+        if already_sustainable:
+            summary_html = '<div style="font-size:1.1em;font-weight:600;color:#27ae60;margin:10px 0">You\'re already sustainable! Passive income covers your burn rate.</div>'
+        elif crossover_month is not None:
+            cross_date = datetime(now.year, now.month, 1) + timedelta(days=32 * crossover_month)
+            cross_date = cross_date.replace(day=1)
+            years = crossover_month // 12
+            mos = crossover_month % 12
+            time_str = ""
+            if years > 0:
+                time_str += f"{years}y "
+            time_str += f"{mos}m"
+            summary_html = f'<div style="font-size:1.1em;font-weight:600;color:#27ae60;margin:10px 0">Sustainability projected in {time_str} ({cross_date.strftime("%b %Y")})</div>'
+        else:
+            summary_html = '<div style="font-size:1.1em;font-weight:600;color:#e74c3c;margin:10px 0">Not projected within 10 years at current rates</div>'
+
+        proj_labels_json = json.dumps(proj_labels)
+        proj_passive_json = json.dumps(proj_passive)
+        proj_burn_json = json.dumps(proj_burn)
+
+        # Point radius array: large green dot at crossover
+        point_radius = [0] * len(proj_passive)
+        point_bg = ["#27ae60"] * len(proj_passive)
+        if crossover_month is not None and crossover_month < len(point_radius):
+            point_radius[crossover_month] = 8
+        point_radius_json = json.dumps(point_radius)
+        point_bg_json = json.dumps(point_bg)
+
+        sustainability_card = f"""
+    <div class="card" style="margin-bottom:20px">
+        <h2>Sustainability Projection</h2>
+        <p style="color:var(--muted);font-style:italic;margin-bottom:10px">Forward projection assuming {annual_yield_rate*100:.1f}% yield, {annual_total_return_rate*100:.1f}% total return, and ${burn_rate:,.0f}/mo burn rate.</p>
+        {summary_html}
+        <div class="chart-container">
+            <canvas id="sustainabilityChart" height="100"></canvas>
+        </div>
+    </div>"""
+
+        sustainability_chart_js = f"""
+    new Chart(document.getElementById('sustainabilityChart'), {{
+        type: 'line',
+        data: {{
+            labels: {proj_labels_json},
+            datasets: [
+                {{
+                    label: 'Passive Income',
+                    data: {proj_passive_json},
+                    borderColor: '#27ae60',
+                    backgroundColor: 'rgba(39, 174, 96, 0.1)',
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: {point_radius_json},
+                    pointBackgroundColor: {point_bg_json},
+                    pointBorderColor: '#27ae60',
+                    borderWidth: 2
+                }},
+                {{
+                    label: 'Burn Rate',
+                    data: {proj_burn_json},
+                    borderColor: '#e74c3c',
+                    borderDash: [6, 4],
+                    fill: false,
+                    pointRadius: 0,
+                    borderWidth: 2
+                }}
+            ]
+        }},
+        options: {{
+            responsive: true,
+            plugins: {{
+                legend: {{ position: 'bottom' }},
+                tooltip: {{
+                    callbacks: {{
+                        label: function(ctx) {{
+                            var val = '$' + (ctx.parsed.y / 1000).toFixed(1) + 'k';
+                            return ctx.dataset.label + ': ' + val;
+                        }},
+                        afterBody: function(items) {{
+                            if (items.length >= 2) {{
+                                var gap = items[0].parsed.y - items[1].parsed.y;
+                                var sign = gap >= 0 ? '+' : '';
+                                return 'Gap: ' + sign + '$' + (gap / 1000).toFixed(1) + 'k';
+                            }}
+                        }}
+                    }}
+                }}
+            }},
+            scales: {{
+                x: {{
+                    ticks: {{
+                        maxTicksLimit: 12,
+                        maxRotation: 45
+                    }}
+                }},
+                y: {{
+                    beginAtZero: true,
+                    ticks: {{
+                        callback: function(v) {{ return '$' + (v / 1000).toFixed(1) + 'k'; }}
+                    }}
+                }}
+            }}
+        }}
+    }});"""
+
     # ── Net Worth card ──
     net_worth_card = ""
     if passive_income:
@@ -2515,10 +2673,11 @@ def generate_html(data: dict, ai_html: str | None = None,
     <div class="stat"><div class="value" style="color:#27ae60">{money(total_income_actual)}</div><div class="label">Total Income ({len(months)} months)</div></div>
     <div class="stat"><div class="value" style="color:#27ae60">{money(income_monthly_avg)}</div><div class="label">Avg Monthly Income</div></div>"""
 
-    # ── Debt Freedom section ──
-    debt_section = ""
+    # ── Milestones Timeline (unified) ──
+    timeline_events = []  # list of (date, icon, title, detail, color)
+
+    # Debt payoff events
     if debt_payoffs:
-        # Group payoffs by merchant
         from collections import defaultdict as _dd
         payoff_by_merchant = _dd(lambda: {"total": 0.0, "last_date": None})
         for d in debt_payoffs:
@@ -2527,45 +2686,72 @@ def generate_html(data: dict, ai_html: str | None = None,
             prev = payoff_by_merchant[d["merchant"]]["last_date"]
             if prev is None or dt > prev:
                 payoff_by_merchant[d["merchant"]]["last_date"] = dt
-        debt_rows = ""
-        for merchant, info in sorted(payoff_by_merchant.items(), key=lambda x: x[1]["total"], reverse=True):
+        for merchant, info in payoff_by_merchant.items():
             rate = INTEREST_RATES.get(merchant, 0)
             annual_saved = info["total"] * rate
-            paid_off_date = info["last_date"].strftime("%b %Y")
-            debt_rows += f"<tr><td>{merchant}</td><td style='text-align:right'>{money(info['total'])}</td><td style='text-align:center'>{rate*100:.2f}%</td><td style='text-align:right'>{money(annual_saved)}</td><td style='text-align:center'>{paid_off_date}</td></tr>"
-        monthly_saved = annual_interest_saved / 12
-        debt_section = f"""
-<section id="debt-freedom" class="card">
-    <h2>Debt Freedom</h2>
-    <p style="color:var(--muted);font-style:italic;margin-bottom:15px">Debts paid off during this period — saving <strong style="color:#27ae60">{money(annual_interest_saved)}/year</strong> ({money(monthly_saved)}/month) in interest</p>
-    <table class="data-table" style="max-width:700px">
-        <thead><tr><th>Debt</th><th style="text-align:right">Principal</th><th style="text-align:center">Rate</th><th style="text-align:right">Annual Savings</th><th style="text-align:center">Paid Off</th></tr></thead>
-        <tbody>{debt_rows}</tbody>
-        <tfoot><tr style="font-weight:700"><td>Total</td><td style="text-align:right">{money(debt_payoff_total)}</td><td></td><td style="text-align:right">{money(annual_interest_saved)}</td><td></td></tr></tfoot>
-    </table>
-</section>"""
+            detail = f"{money(info['total'])} principal eliminated"
+            if annual_saved > 0:
+                detail += f" &mdash; saving {money(annual_saved)}/yr in interest"
+            timeline_events.append((info["last_date"], "\u2705", f"{merchant} Paid Off", detail, "#27ae60"))
 
-    # ── Corporate Milestones section ──
-    corp_milestones_section = ""
+    # Corporate milestones
     if corporate_income:
-        milestone_rows = ""
         earliest = corporate_income.get("earliest_txn_date")
         first_rev = corporate_income.get("first_revenue")
         first_div = corporate_income.get("first_dividend")
         if earliest:
-            milestone_rows += f'<tr><td>{earliest.strftime("%b %d, %Y")}</td><td>Corporate Ventures Launch</td><td>Tall Tree Technology &amp; Britton Holdings accounts opened</td></tr>'
+            timeline_events.append((earliest, "\U0001f3e2", "Corporate Ventures Launch", "Tall Tree Technology &amp; Britton Holdings accounts opened", "#4e79a7"))
         if first_rev:
-            milestone_rows += f'<tr><td>{first_rev["date"].strftime("%b %d, %Y")}</td><td>First Tall Tree Revenue</td><td>First client payment received &mdash; {money(first_rev["amount"])}</td></tr>'
+            timeline_events.append((first_rev["date"], "\U0001f4b5", "First Tall Tree Revenue", f"First client payment received &mdash; {money(first_rev['amount'])}", "#27ae60"))
         if first_div:
-            milestone_rows += f'<tr><td>{first_div["date"].strftime("%b %d, %Y")}</td><td>First Corporate Dividend</td><td>First investment dividend from Britton Holdings &mdash; {money(first_div["amount"])}</td></tr>'
-        if milestone_rows:
-            corp_milestones_section = f"""
-<section id="corp-milestones" class="card">
-    <h2>Corporate</h2>
-    <p style="color:var(--muted);font-style:italic;margin-bottom:15px">Key milestones in the Tall Tree Technology and Britton Holdings corporate journey.</p>
-    <table class="data-table" style="max-width:700px">
-        <thead><tr><th>Date</th><th>Milestone</th><th>Details</th></tr></thead>
-        <tbody>{milestone_rows}</tbody>
+            timeline_events.append((first_div["date"], "\U0001f4c8", "First Corporate Dividend", f"First investment dividend from Britton Holdings &mdash; {money(first_div['amount'])}", "#4e79a7"))
+
+    # Passive income milestone
+    if passive_income and monthly_passive > 0:
+        timeline_events.append((datetime.now().date(), "\U0001f33f", "Portfolio Yielding Passive Income", f"{money(monthly_passive)}/mo from {passive_income.get('account_count', 0)} accounts ({money(annual_passive)}/yr)", "#27ae60"))
+
+    # Sustainability milestone (if already sustainable)
+    if passive_income and burn_rate > 0 and combined_monthly >= burn_rate:
+        timeline_events.append((datetime.now().date(), "\u2b50", "Sustainability Achieved", f"Combined income ({money(combined_monthly)}/mo) covers burn rate ({money(burn_rate)}/mo)", "#f28e2b"))
+
+    def _to_date(d):
+        return d.date() if isinstance(d, datetime) else d
+    timeline_events.sort(key=lambda e: _to_date(e[0]))
+
+    milestones_section = ""
+    if timeline_events:
+        timeline_rows = ""
+        for date_val, icon, title, detail, color in timeline_events:
+            if hasattr(date_val, 'strftime'):
+                date_str = date_val.strftime("%b %d, %Y")
+            else:
+                date_str = str(date_val)
+            timeline_rows += f"""
+            <tr>
+                <td style="white-space:nowrap;color:var(--muted);font-size:0.9em;padding:14px 20px 14px 16px;vertical-align:top">{date_str}</td>
+                <td style="font-size:1.3em;padding:14px 12px;vertical-align:top;text-align:center">{icon}</td>
+                <td style="padding:14px 16px 14px 8px">
+                    <div style="font-weight:600;color:{color};font-size:1.0em">{title}</div>
+                    <div style="color:var(--muted);font-size:0.88em;margin-top:2px">{detail}</div>
+                </td>
+            </tr>"""
+
+        # Summary stats
+        summary_parts = []
+        if debt_payoffs:
+            monthly_saved = annual_interest_saved / 12
+            summary_parts.append(f"{money(debt_payoff_total)} debt eliminated &mdash; saving {money(annual_interest_saved)}/yr ({money(monthly_saved)}/mo) in interest")
+
+        summary_html = ""
+        if summary_parts:
+            summary_html = '<p style="color:var(--muted);font-style:italic;margin-bottom:18px">' + ". ".join(summary_parts) + ".</p>"
+
+        milestones_section = f"""
+<section class="card">
+    <h2>Timeline</h2>
+    {summary_html}
+    <table style="width:100%;border-collapse:separate;border-spacing:0">
+        <tbody>{timeline_rows}</tbody>
     </table>
 </section>"""
 
@@ -2846,7 +3032,7 @@ def generate_html(data: dict, ai_html: str | None = None,
     if corporate_income or passive_income or incoming_etransfers or bank_interest:
         income_tab_btn = '<button data-tab="tab-income">Income</button>'
     milestones_tab_btn = ''
-    if debt_payoffs or corp_milestones_section:
+    if milestones_section:
         milestones_tab_btn = '<button data-tab="tab-milestones">Milestones</button>'
     ai_tab_btn = ''
     if ai_html:
@@ -2920,6 +3106,8 @@ h2 {{ font-size: 1.3em; margin-bottom: 15px; color: var(--accent); border-bottom
 .ai-recommendations li {{ counter-increment: rec; background: var(--bg); border-radius: 10px; padding: 16px 18px 16px 52px; margin-bottom: 12px; position: relative; border: 1px solid var(--border); }}
 .ai-recommendations li::before {{ content: counter(rec); position: absolute; left: 16px; top: 16px; width: 26px; height: 26px; background: var(--accent); color: #fff; border-radius: 50%; font-size: 0.82em; font-weight: 700; display: flex; align-items: center; justify-content: center; }}
 .ai-recommendations li:last-child {{ margin-bottom: 0; }}
+.ai-badge {{ font-size: 0.65em; background: #f39c12; color: #fff; padding: 2px 8px; border-radius: 10px; margin-left: 8px; cursor: pointer; vertical-align: middle; text-decoration: none; }}
+.ai-badge:hover {{ background: #e67e22; }}
 canvas {{ max-width: 100%; }}
 .noscript-table {{ margin-top: 10px; }}
 .tab-nav {{ display: flex; flex-wrap: wrap; gap: 8px; background: var(--card); border-radius: 12px; padding: 15px 25px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }}
@@ -2946,6 +3134,7 @@ canvas {{ max-width: 100%; }}
 <div class="tab-panel active" id="tab-big-picture">
 <div id="overview"></div>
 {hero_card}
+{sustainability_card}
 {net_worth_card}
 <div class="stats">
     {overview_stats}
@@ -2990,7 +3179,7 @@ canvas {{ max-width: 100%; }}
 </div>
 
 <!-- ═══ MILESTONES ═══ -->
-{'<div class="tab-panel" id="tab-milestones">' + debt_section + corp_milestones_section + '</div>' if (debt_payoffs or corp_milestones_section) else ''}
+{'<div class="tab-panel" id="tab-milestones">' + milestones_section + '</div>' if milestones_section else ''}
 
 <!-- ═══ AI RECOMMENDATIONS ═══ -->
 {'<div class="tab-panel" id="tab-ai">' + ai_section + '</div>' if ai_html else ''}
@@ -3018,6 +3207,38 @@ document.addEventListener('DOMContentLoaded', function() {{
     }});
 }});
 </script>
+<script>
+document.addEventListener('DOMContentLoaded', function() {{
+    var items = document.querySelectorAll('.ai-recommendations li[data-sections]');
+    items.forEach(function(li, idx) {{
+        var tipNum = idx + 1;
+        var sections = li.getAttribute('data-sections').split(',');
+        li.id = 'ai-tip-' + tipNum;
+        sections.forEach(function(id) {{
+            id = id.trim();
+            var section = document.getElementById(id);
+            if (!section) return;
+            var h2 = section.querySelector('h2');
+            if (!h2) return;
+            var badge = document.createElement('a');
+            badge.className = 'ai-badge';
+            badge.textContent = 'AI tip #' + tipNum;
+            badge.href = '#';
+            badge.addEventListener('click', function(e) {{
+                e.preventDefault();
+                var aiBtn = document.querySelector('.tab-nav button[data-tab="tab-ai"]');
+                if (aiBtn) aiBtn.click();
+                setTimeout(function() {{
+                    li.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+                    li.style.outline = '2px solid #f39c12';
+                    setTimeout(function() {{ li.style.outline = ''; }}, 2000);
+                }}, 100);
+            }});
+            h2.appendChild(badge);
+        }});
+    }});
+}});
+</script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
 <script>
 document.addEventListener('DOMContentLoaded', function() {{
@@ -3025,6 +3246,7 @@ document.addEventListener('DOMContentLoaded', function() {{
 
     {fixed_chart_js}
 
+    {sustainability_chart_js}
 
 }});
 </script>
