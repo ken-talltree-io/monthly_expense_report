@@ -1,0 +1,8 @@
+# Encrypted directories — PDF statements and transaction CSVs
+statements/** filter=git-crypt diff=git-crypt
+transactions/** filter=git-crypt diff=git-crypt
+
+# Encrypted config CSVs with account details
+portfolio.csv filter=git-crypt diff=git-crypt
+notes.csv filter=git-crypt diff=git-crypt
+etransfer-notes.csv filter=git-crypt diff=git-crypt
