@@ -1403,6 +1403,9 @@ def extract_corporate_income(folder: str) -> dict | None:
 
     revenue_monthly = defaultdict(float)
     dividends_monthly = defaultdict(float)
+    first_revenue = None  # (date, amount)
+    first_dividend = None  # (date, amount)
+    earliest_txn_date = None
 
     for fpath in csv_files:
         fname = os.path.basename(fpath)
@@ -1429,12 +1432,20 @@ def extract_corporate_income(folder: str) -> dict | None:
                 if amount <= 0:
                     continue
 
-                month = datetime.strptime(date_str, "%Y-%m-%d").strftime("%Y-%m")
+                dt = datetime.strptime(date_str, "%Y-%m-%d").date()
+                month = dt.strftime("%Y-%m")
+
+                if earliest_txn_date is None or dt < earliest_txn_date:
+                    earliest_txn_date = dt
 
                 if is_tall_tree and txn_type == "CONT":
                     revenue_monthly[month] += amount
+                    if first_revenue is None or dt < first_revenue[0]:
+                        first_revenue = (dt, amount)
                 elif is_bh and txn_type == "DIV":
                     dividends_monthly[month] += amount
+                    if first_dividend is None or dt < first_dividend[0]:
+                        first_dividend = (dt, amount)
 
     if not revenue_monthly and not dividends_monthly:
         return None
@@ -1454,6 +1465,9 @@ def extract_corporate_income(folder: str) -> dict | None:
         "total_income": round(total_income, 2),
         "monthly_avg": round(total_income / num_months, 2) if num_months else 0,
         "months": num_months,
+        "first_revenue": {"date": first_revenue[0], "amount": first_revenue[1]} if first_revenue else None,
+        "first_dividend": {"date": first_dividend[0], "amount": first_dividend[1]} if first_dividend else None,
+        "earliest_txn_date": earliest_txn_date,
     }
 
 
@@ -2531,6 +2545,30 @@ def generate_html(data: dict, ai_html: str | None = None,
     </table>
 </section>"""
 
+    # ── Corporate Milestones section ──
+    corp_milestones_section = ""
+    if corporate_income:
+        milestone_rows = ""
+        earliest = corporate_income.get("earliest_txn_date")
+        first_rev = corporate_income.get("first_revenue")
+        first_div = corporate_income.get("first_dividend")
+        if earliest:
+            milestone_rows += f'<tr><td>{earliest.strftime("%b %d, %Y")}</td><td>Corporate Ventures Launch</td><td>Tall Tree Technology &amp; Britton Holdings accounts opened</td></tr>'
+        if first_rev:
+            milestone_rows += f'<tr><td>{first_rev["date"].strftime("%b %d, %Y")}</td><td>First Tall Tree Revenue</td><td>First client payment received &mdash; {money(first_rev["amount"])}</td></tr>'
+        if first_div:
+            milestone_rows += f'<tr><td>{first_div["date"].strftime("%b %d, %Y")}</td><td>First Corporate Dividend</td><td>First investment dividend from Britton Holdings &mdash; {money(first_div["amount"])}</td></tr>'
+        if milestone_rows:
+            corp_milestones_section = f"""
+<section id="corp-milestones" class="card">
+    <h2>Corporate</h2>
+    <p style="color:var(--muted);font-style:italic;margin-bottom:15px">Key milestones in the Tall Tree Technology and Britton Holdings corporate journey.</p>
+    <table class="data-table" style="max-width:700px">
+        <thead><tr><th>Date</th><th>Milestone</th><th>Details</th></tr></thead>
+        <tbody>{milestone_rows}</tbody>
+    </table>
+</section>"""
+
     # ── Fixed vs Discretionary section ──
     fixed_section = ""
     if fixed_detail:
@@ -2808,7 +2846,7 @@ def generate_html(data: dict, ai_html: str | None = None,
     if corporate_income or passive_income or incoming_etransfers or bank_interest:
         income_tab_btn = '<button data-tab="tab-income">Income</button>'
     milestones_tab_btn = ''
-    if debt_payoffs:
+    if debt_payoffs or corp_milestones_section:
         milestones_tab_btn = '<button data-tab="tab-milestones">Milestones</button>'
     ai_tab_btn = ''
     if ai_html:
@@ -2952,7 +2990,7 @@ canvas {{ max-width: 100%; }}
 </div>
 
 <!-- ═══ MILESTONES ═══ -->
-{'<div class="tab-panel" id="tab-milestones">' + debt_section + '</div>' if debt_payoffs else ''}
+{'<div class="tab-panel" id="tab-milestones">' + debt_section + corp_milestones_section + '</div>' if (debt_payoffs or corp_milestones_section) else ''}
 
 <!-- ═══ AI RECOMMENDATIONS ═══ -->
 {'<div class="tab-panel" id="tab-ai">' + ai_section + '</div>' if ai_html else ''}
