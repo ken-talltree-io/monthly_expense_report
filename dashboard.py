@@ -2260,12 +2260,12 @@ def generate_html(data: dict, ai_html: str | None = None,
             return (f"<td style='text-align:right;font-style:italic'>{pct:.1f}%"
                     f"<br><span style='font-size:0.75em;color:#e67e22'>csv</span></td>")
 
-    def yield_cell(a: dict, heatmap_bg: str) -> str:
-        """Render a yield <td> with source annotation and heatmap."""
+    def income_cell(a: dict, heatmap_bg: str) -> str:
+        """Render an income/yr <td> with source annotation and heatmap."""
         val = money(a["annual_yield"])
         src = a.get("yield_source", "estimated")
         if src == "statement dividends":
-            note = "from dividends"
+            note = "dividends"
         elif src == "estimated":
             note = "est."
         else:
@@ -2273,113 +2273,90 @@ def generate_html(data: dict, ai_html: str | None = None,
         annotation = f"<br><span style='font-size:0.75em;color:var(--muted)'>{note}</span>" if note else ""
         return f"<td style='text-align:right;background:{heatmap_bg}'>{val}{annotation}</td>"
 
+    def vs_avg_cell(a: dict, avg_return: float) -> str:
+        """Render vs Avg as +/- percentage points of return vs bucket average."""
+        diff_pp = a["return_pct"] - avg_return
+        new_badge = ""
+        if a.get('start_date'):
+            age_days = (datetime.now().date() - a['start_date']).days
+            age_months = age_days // 30
+            if age_months < 6:
+                label = f"{age_months} mo" if age_months > 0 else "< 1 mo"
+                new_badge = f"<br><span style='font-size:0.8em;color:var(--muted)'>est. {label} ago — monitor</span>"
+        if diff_pp >= 0:
+            return f"<td style='text-align:right;color:#27ae60'>+{diff_pp:.1f} pp</td>"
+        else:
+            return f"<td style='text-align:right;color:#e67e22'>{diff_pp:.1f} pp{new_badge}</td>"
+
     passive_section = ""
     if passive_income:
-        # Accessible accounts table rows (sorted by yield desc, with heatmap)
+        # Accessible accounts table rows (sorted by return % desc)
         acc_total_balance = passive_income["accessible_balance"]
         acc_total_annual = passive_income["annual_income"]
         acc_monthly = passive_income["monthly_income"]
         acc_avg_return = (acc_total_annual / acc_total_balance * 100) if acc_total_balance else 0
 
-        # Sort accounts by yield gap (outperformers first)
         acc_sorted = sorted(passive_income["accounts"],
-                            key=lambda a: a['annual_yield'] - a['value'] * acc_avg_return / 100,
+                            key=lambda a: a['return_pct'],
                             reverse=True)
 
         acc_rows = ""
-        acc_gaps = []
         acc_yields = [a['annual_yield'] for a in acc_sorted]
         acc_max_yield = max(acc_yields) if acc_yields else 1
         for a in acc_sorted:
             intensity = a['annual_yield'] / acc_max_yield if acc_max_yield else 0
             heatmap_bg = f"rgba(39, 174, 96, {intensity * 0.35:.2f})"
-            expected_yield = a['value'] * acc_avg_return / 100
-            gap = a['annual_yield'] - expected_yield
-            acc_gaps.append(gap)
-            # Check if position is new (< 6 months old)
-            new_badge = ""
-            if a.get('start_date'):
-                age_days = (datetime.now().date() - a['start_date']).days
-                age_months = age_days // 30
-                if age_months < 6:
-                    label = f"{age_months} mo" if age_months > 0 else "< 1 mo"
-                    new_badge = f"<br><span style='font-size:0.8em;color:var(--muted)'>est. {label} ago — monitor</span>"
-            if gap >= 0:
-                gap_cell = f"<td style='text-align:right;color:#27ae60'>✅ +{money(abs(gap))}/yr</td>"
-            else:
-                gap_cell = f"<td style='text-align:right;color:#e67e22'>⚠️ −{money(abs(gap))}/yr{new_badge}</td>"
             acc_rows += (
                 f"<tr><td>{a['account']}</td><td>{a.get('brokerage','')}</td><td>{a['type']}</td>"
                 f"{balance_cell(a)}"
                 f"{return_cell(a)}"
-                f"{yield_cell(a, heatmap_bg)}"
-                f"{gap_cell}</tr>"
+                f"{income_cell(a, heatmap_bg)}"
+                f"{vs_avg_cell(a, acc_avg_return)}</tr>"
             )
-        acc_unrealized = sum(g for g in acc_gaps if g < 0)
 
         # Registered accounts table (RRSP + RESP — TFSAs are in Accessible)
         reg_html = ""
         if passive_income.get("registered_accounts"):
             reg_avg_return = (passive_income['registered_annual'] / passive_income['registered_balance'] * 100) if passive_income['registered_balance'] else 0
-            # Sort registered accounts by yield gap (outperformers first)
+
             reg_sorted = sorted(passive_income["registered_accounts"],
-                                 key=lambda a: a['annual_yield'] - a['value'] * reg_avg_return / 100,
+                                 key=lambda a: a['return_pct'],
                                  reverse=True)
             reg_rows = ""
-            reg_gaps = []
             reg_yields = [a['annual_yield'] for a in reg_sorted]
             reg_max_yield = max(reg_yields) if reg_yields else 1
             for a in reg_sorted:
                 intensity = a['annual_yield'] / reg_max_yield if reg_max_yield else 0
                 heatmap_bg = f"rgba(39, 174, 96, {intensity * 0.35:.2f})"
-                expected_yield = a['value'] * reg_avg_return / 100
-                gap = a['annual_yield'] - expected_yield
-                reg_gaps.append(gap)
-                # Check if position is new (< 6 months old)
-                new_badge = ""
-                if a.get('start_date'):
-                    age_days = (datetime.now().date() - a['start_date']).days
-                    age_months = age_days // 30
-                    if age_months < 6:
-                        label = f"{age_months} mo" if age_months > 0 else "< 1 mo"
-                        new_badge = f"<br><span style='font-size:0.8em;color:var(--muted)'>est. {label} ago — monitor</span>"
-                if gap >= 0:
-                    gap_cell = f"<td style='text-align:right;color:#27ae60'>+{money(abs(gap))}/yr</td>"
-                else:
-                    gap_cell = f"<td style='text-align:right;color:#e67e22'>-{money(abs(gap))}/yr{new_badge}</td>"
                 reg_rows += (
                     f"<tr><td>{a['account']}</td><td>{a.get('brokerage','')}</td><td>{a['type']}</td>"
                     f"{balance_cell(a)}"
                     f"{return_cell(a)}"
-                    f"{yield_cell(a, heatmap_bg)}"
-                    f"{gap_cell}</tr>"
+                    f"{income_cell(a, heatmap_bg)}"
+                    f"{vs_avg_cell(a, reg_avg_return)}</tr>"
                 )
-            reg_unrealized = sum(g for g in reg_gaps if g < 0)
-            reg_unrealized_row = f'<tr style="color:#e67e22"><td colspan="6">Unrealized</td><td style="text-align:right">-{money(abs(reg_unrealized))}/yr (-{money(abs(reg_unrealized) / 12)}/mo)</td></tr>' if reg_unrealized < 0 else ""
             reg_html = f"""
     <h3 style="margin-top:30px">Registered Accounts <span style="font-weight:400;color:var(--muted);font-size:0.85em">(RRSP, RESP — not accessible without tax penalty)</span></h3>
     <table class="data-table" style="max-width:100%">
-        <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Annual Yield</th><th style="text-align:right">vs Avg</th></tr></thead>
+        <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Income/yr</th><th style="text-align:right">vs Avg</th></tr></thead>
         <tbody>{reg_rows}</tbody>
         <tfoot>
             <tr style="font-weight:700"><td colspan="3">Total Registered</td><td style="text-align:right">{money(passive_income['registered_balance'])}</td><td style="text-align:right">{reg_avg_return:.1f}%</td><td style="text-align:right">{money(passive_income['registered_annual'])}</td><td></td></tr>
             <tr style="color:var(--muted)"><td colspan="6">Monthly Income</td><td style="text-align:right">{money(passive_income['registered_monthly'])}</td></tr>
-            {reg_unrealized_row}
         </tfoot>
     </table>"""
 
         passive_section = f"""
 <section id="passive-income" class="card">
     <h2>Passive Income &amp; Accessible Savings</h2>
-    <p style="color:var(--muted);margin-bottom:15px">Yield from personal investment accounts — accessible balance breakdown</p>
+    <p style="color:var(--muted);margin-bottom:15px">Income from personal investment accounts — accessible balance breakdown</p>
     <h3>Accessible Accounts</h3>
     <table class="data-table" style="max-width:100%">
-        <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Annual Yield</th><th style="text-align:right">vs Avg</th></tr></thead>
+        <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Income/yr</th><th style="text-align:right">vs Avg</th></tr></thead>
         <tbody>{acc_rows}</tbody>
         <tfoot>
             <tr style="font-weight:700"><td colspan="3">Total Accessible</td><td style="text-align:right">{money(acc_total_balance)}</td><td style="text-align:right">{acc_avg_return:.1f}%</td><td style="text-align:right">{money(acc_total_annual)}</td><td></td></tr>
             <tr style="color:var(--muted)"><td colspan="6">Monthly Income</td><td style="text-align:right">{money(acc_monthly)}</td></tr>
-            {'<tr style="color:#e67e22"><td colspan="6">Unrealized</td><td style="text-align:right">−' + money(abs(acc_unrealized)) + '/yr (−' + money(abs(acc_unrealized) / 12) + '/mo)</td></tr>' if acc_unrealized < 0 else ""}
         </tfoot>
     </table>
     {reg_html}
