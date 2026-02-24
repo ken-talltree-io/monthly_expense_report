@@ -156,7 +156,7 @@ def analyze(transactions: list[dict], transfers: dict | None = None,
             for a in amounts:
                 matched = False
                 for u in unique_approx:
-                    if abs(a - u) / u < PRICE_MATCH_TOLERANCE:
+                    if u > 0 and abs(a - u) / u < PRICE_MATCH_TOLERANCE:
                         matched = True
                         break
                 if not matched:
@@ -333,7 +333,7 @@ def get_ai_recommendations(data: dict, passive_income: dict | None = None,
         rev_avg3 = round(sum(rev_last3) / len(rev_last3), 2) if rev_last3 else 0
         div_avg3 = round(sum(div_last3) / len(div_last3), 2) if div_last3 else 0
 
-        take_home_rate = 0.60
+        take_home_rate = CORPORATE_TAKE_HOME_RATE
         summary["corporate_income"] = {
             "revenue_monthly": rev,
             "dividends_monthly": div,
