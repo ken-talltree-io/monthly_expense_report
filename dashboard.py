@@ -22,6 +22,9 @@ from config import (
     CATEGORY_CONSOLIDATION,
     CORPORATE_TAKE_HOME_RATE,
     DEBT_PAYOFF_THRESHOLDS,
+    INTEREST_RATES,
+    CASHBACK_RATE,
+    SUSTAINABILITY_PROJECTION_MONTHS,
     load_budgets,
     load_notes,
     load_user_categories,
@@ -121,10 +124,6 @@ def generate_html(data: dict, ai_html: str | None = None,
 
     # Debt payoff data
     debt_payoffs = data.get("debt_payoffs", [])
-    INTEREST_RATES = {
-        "Mortgage (First National)": 0.0325,
-        "Hyundai Car Payment": 0.0399,
-    }
     debt_payoff_total = sum(d["amount"] for d in debt_payoffs)
     annual_interest_saved = sum(
         d["amount"] * INTEREST_RATES.get(d["merchant"], 0) for d in debt_payoffs
@@ -141,8 +140,7 @@ def generate_html(data: dict, ai_html: str | None = None,
             m_total -= debt_in_month
         adjusted_monthly[m] = m_total
 
-    # Apply 2% VISA cash-back reduction to credit card spend
-    CASHBACK_RATE = 0.02
+    # Apply VISA cash-back reduction to credit card spend
     credit_by_month = source_breakdown.get("credit", {})
     cashback_monthly = {m: round(credit_by_month.get(m, 0) * CASHBACK_RATE, 2) for m in months}
     cashback_total = sum(cashback_monthly.values())
@@ -179,7 +177,7 @@ def generate_html(data: dict, ai_html: str | None = None,
         group_total = sum(s["avg"] for s in subs)
         num_cols = len(sub_months) + 2  # Service + Avg + months
         label = status_labels.get(status, status.title())
-        sub_rows += f'<tr style="background:var(--bg);font-weight:600"><td colspan="{num_cols}">{status_badge(status)} {label} — {money(group_total)}/mo ({len(subs)})</td></tr>'
+        sub_rows += f'<tr class="group-header"><td colspan="{num_cols}">{status_badge(status)} {label} — {money(group_total)}/mo ({len(subs)})</td></tr>'
         for s in subs:
             month_cells = ""
             for m in sub_months:
@@ -222,7 +220,7 @@ def generate_html(data: dict, ai_html: str | None = None,
         txns = etransfer_by_month[m]
         month_label = datetime.strptime(m, "%Y-%m").strftime("%b %Y")
         month_total = sum(t["amount"] for t in txns)
-        etransfer_rows += f'<tr style="background:var(--bg);font-weight:600"><td colspan="2">{month_label}</td><td style="text-align:right">{money(month_total)}</td></tr>'
+        etransfer_rows += f'<tr class="group-header"><td colspan="2">{month_label}</td><td style="text-align:right">{money(month_total)}</td></tr>'
         for t in txns:
             date_str = str(t["date"])[:10]
             amt_str = f'{t["amount"]:.2f}'
@@ -358,13 +356,19 @@ def generate_html(data: dict, ai_html: str | None = None,
         spot_cats.sort(key=lambda x: x[1], reverse=True)
         spot_cats = spot_cats[:5]
 
+        def delta_inline(val):
+            """Compact delta for table cells — arrow + amount, no percentage."""
+            if val > 0:
+                return f'<span style="color:#e15759;font-size:0.85em">\u2191 {money(val)}</span>'
+            elif val < 0:
+                return f'<span style="color:#27ae60;font-size:0.85em">\u2193 {money(abs(val))}</span>'
+            return ""
+
         top_cats_rows = ""
         for cat_name, cat_val, cat_delta in spot_cats:
             mom_cell = '<td style="text-align:right;color:var(--muted)">&mdash;</td>'
             if prior_month and cat_delta != 0:
-                d_color = "#e15759" if cat_delta > 0 else "#27ae60"
-                d_arrow = "\u2191" if cat_delta > 0 else "\u2193"
-                mom_cell = f'<td style="text-align:right"><span style="color:{d_color};font-size:0.85em">{d_arrow} {money(abs(cat_delta))}</span></td>'
+                mom_cell = f'<td style="text-align:right">{delta_inline(cat_delta)}</td>'
             budget_cell = ""
             if has_budgets:
                 target = budgets.get(cat_name)
@@ -379,10 +383,10 @@ def generate_html(data: dict, ai_html: str | None = None,
             top_txn_rows += f"<tr><td>{t['merchant']}</td><td style='text-align:center'>{t['date'].strftime('%b %d')}</td><td style='text-align:right'>{money(t['amount'])}</td></tr>"
 
         spotlight_html = f"""
-<section class="card" style="margin-bottom:20px">
+<section class="card">
     <h2>Monthly Spotlight: {spot_label}</h2>
-    <p style="color:var(--muted);font-style:italic;margin-bottom:15px">Your most recent month at a glance — top categories and biggest transactions vs prior month.</p>
-    <div style="display:grid;grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));gap:15px;margin-bottom:20px">
+    <p class="section-desc">Your most recent month at a glance — top categories and biggest transactions vs prior month.</p>
+    <div class="stats">
         <div class="stat"><div class="value">{money(spot_total)}</div><div class="label">Total Spend</div></div>
         <div class="stat"><div class="value">{delta_badge(delta_prior, delta_prior_pct)}</div><div class="label">vs Prior Month</div></div>
         <div class="stat"><div class="value">{delta_badge(delta_avg, delta_avg_pct)}</div><div class="label">vs 3-Month Avg</div></div>
@@ -526,10 +530,10 @@ def generate_html(data: dict, ai_html: str | None = None,
         sr_savings_data = json.dumps([round(savings_dollars_by_month[m], 2) for m in months])
 
         savings_rate_section = f"""
-    <div class="card" style="margin-bottom:20px">
+    <div class="card">
         <h2>Savings Rate</h2>
-        <p style="color:var(--muted);font-style:italic;margin-bottom:15px">Percentage of income retained each month. Savings rate = (income &minus; spending) &divide; income.</p>
-        <div class="stats" style="margin-bottom:20px">
+        <p class="section-desc">Percentage of income retained each month. Savings rate = (income &minus; spending) &divide; income.</p>
+        <div class="stats">
             <div class="stat">
                 <div class="value" style="color:{_sr_color(savings_current)}">{savings_current:+.1f}%</div>
                 <div class="label">Current Month</div>
@@ -642,9 +646,9 @@ def generate_html(data: dict, ai_html: str | None = None,
             net_draw = max(burn_rate - combined_monthly, 0)
             if net_draw > 0:
                 runway = accessible_balance / net_draw
-                savings_line = f'<div style="font-size:0.85em;color:var(--muted);margin-top:4px">Accessible savings: {money(accessible_balance)} &middot; {runway:.0f} months runway</div>'
+                savings_line = f'<div class="metric-sub" style="margin-top:4px">Accessible savings: {money(accessible_balance)} &middot; {runway:.0f} months runway</div>'
             else:
-                savings_line = f'<div style="font-size:0.85em;color:var(--muted);margin-top:4px">Accessible savings: {money(accessible_balance)}</div>'
+                savings_line = f'<div class="metric-sub" style="margin-top:4px">Accessible savings: {money(accessible_balance)}</div>'
         other_income_block = ""
         if other_income_monthly > 0:
             # Build subtitle showing breakdown
@@ -655,38 +659,32 @@ def generate_html(data: dict, ai_html: str | None = None,
                 other_parts.append(f"interest {money(bank_interest_monthly_avg)}")
             other_subtitle = " + ".join(other_parts)
             other_income_block = f"""
-            <div style="flex:0 0 40px;text-align:center">
-                <div style="font-size:1.8em;color:var(--muted)">+</div>
-            </div>
-            <div style="flex:1;min-width:160px;text-align:center">
-                <div style="font-size:0.85em;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Other Income</div>
-                <div style="font-size:2.2em;font-weight:700;color:#27ae60">{money(other_income_monthly)}<span style="font-size:0.4em;font-weight:400;color:var(--muted)">/mo</span></div>
-                <div style="font-size:0.85em;color:var(--muted)">{other_subtitle}</div>
+            <div class="hero-sep">+</div>
+            <div class="hero-block text-center">
+                <div class="metric-label">Other Income</div>
+                <div class="metric-value text-positive">{money(other_income_monthly)}<span class="unit">/mo</span></div>
+                <div class="metric-sub">{other_subtitle}</div>
             </div>"""
         hero_card = f"""
-    <div class="card" style="margin-bottom:20px">
-        <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:20px">
-            <div style="flex:1;min-width:160px">
-                <div style="font-size:0.85em;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Income</div>
-                <div style="font-size:2.2em;font-weight:700;color:#27ae60">{money(corp_monthly_takehome)}<span style="font-size:0.4em;font-weight:400;color:var(--muted)">/mo</span></div>
-                <div style="font-size:0.85em;color:var(--muted)">corporate take-home</div>
+    <div class="card">
+        <div class="hero-layout">
+            <div class="hero-block">
+                <div class="metric-label">Income</div>
+                <div class="metric-value text-positive">{money(corp_monthly_takehome)}<span class="unit">/mo</span></div>
+                <div class="metric-sub">corporate take-home</div>
             </div>
-            <div style="flex:0 0 40px;text-align:center">
-                <div style="font-size:1.8em;color:var(--muted)">+</div>
-            </div>
-            <div style="flex:1;min-width:160px;text-align:center">
-                <div style="font-size:0.85em;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Passive Income</div>
-                <div style="font-size:2.2em;font-weight:700;color:#27ae60">{money(monthly_passive)}<span style="font-size:0.4em;font-weight:400;color:var(--muted)">/mo</span></div>
-                <div style="font-size:0.85em;color:var(--muted)">portfolio yield</div>
+            <div class="hero-sep">+</div>
+            <div class="hero-block text-center">
+                <div class="metric-label">Passive Income</div>
+                <div class="metric-value text-positive">{money(monthly_passive)}<span class="unit">/mo</span></div>
+                <div class="metric-sub">portfolio yield</div>
             </div>
             {other_income_block}
-            <div style="flex:0 0 40px;text-align:center">
-                <div style="font-size:1.8em;color:var(--muted)">vs</div>
-            </div>
-            <div style="flex:1;min-width:160px;text-align:right">
-                <div style="font-size:0.85em;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px;margin-bottom:4px">Burn Rate</div>
-                <div style="font-size:2.2em;font-weight:700;color:#e15759">{money(burn_rate)}<span style="font-size:0.4em;font-weight:400;color:var(--muted)">/mo</span></div>
-                <div style="font-size:0.85em;color:var(--muted)">3-month trailing avg (net of 2% cash-back)</div>
+            <div class="hero-sep">vs</div>
+            <div class="hero-block text-right">
+                <div class="metric-label">Burn Rate</div>
+                <div class="metric-value text-negative">{money(burn_rate)}<span class="unit">/mo</span></div>
+                <div class="metric-sub">3-month trailing avg (net of 2% cash-back)</div>
             </div>
         </div>
         <div style="margin-top:20px">
@@ -694,8 +692,8 @@ def generate_html(data: dict, ai_html: str | None = None,
                 <span style="font-size:0.85em;font-weight:600;color:{coverage_color}">Coverage: {coverage_pct:.0f}%</span>
                 <span style="font-size:0.85em;color:{coverage_color}">{coverage_label}</span>
             </div>
-            <div style="background:#eee;border-radius:6px;height:12px;overflow:hidden">
-                <div style="width:{bar_fill:.0f}%;background:{coverage_color};height:100%;border-radius:6px;transition:width 0.3s"></div>
+            <div class="progress-bar">
+                <div class="progress-fill" style="width:{bar_fill:.0f}%;background:{coverage_color}"></div>
             </div>
             {savings_line}
         </div>
@@ -730,7 +728,7 @@ def generate_html(data: dict, ai_html: str | None = None,
         crossover_month = None
         already_sustainable = (monthly_passive >= burn_rate)
         now = datetime.now()
-        max_months = 120
+        max_months = SUSTAINABILITY_PROJECTION_MONTHS
         for i in range(max_months):
             m_date = datetime(now.year, now.month, 1) + timedelta(days=32 * i)
             m_date = m_date.replace(day=1)
@@ -785,9 +783,9 @@ def generate_html(data: dict, ai_html: str | None = None,
             proj_desc = f"Assuming {annual_yield_rate*100:.1f}% yield, {annual_total_return_rate*100:.1f}% total return, ${burn_rate:,.0f}/mo burn rate."
 
         sustainability_card = f"""
-    <div class="card" style="margin-bottom:20px">
+    <div class="card">
         <h2>Sustainability Projection</h2>
-        <p style="color:var(--muted);font-style:italic;margin-bottom:10px">{proj_desc}</p>
+        <p class="section-desc" style="margin-bottom:10px">{proj_desc}</p>
         {summary_html}
         <div class="chart-container">
             <canvas id="sustainabilityChart" height="100"></canvas>
@@ -878,30 +876,30 @@ def generate_html(data: dict, ai_html: str | None = None,
                 return money(val)
 
         nw_metrics = f"""
-            <div style="flex:1;min-width:120px;text-align:center">
-                <div style="font-size:0.78em;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Accessible</div>
-                <div style="font-size:1.4em;font-weight:600">{fmt_compact(nw_accessible)}</div>
+            <div class="nw-item">
+                <div class="nw-label">Accessible</div>
+                <div class="nw-value">{fmt_compact(nw_accessible)}</div>
             </div>
-            <div style="flex:1;min-width:120px;text-align:center">
-                <div style="font-size:0.78em;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Registered</div>
-                <div style="font-size:1.4em;font-weight:600">{fmt_compact(nw_registered)}</div>
+            <div class="nw-item">
+                <div class="nw-label">Registered</div>
+                <div class="nw-value">{fmt_compact(nw_registered)}</div>
             </div>"""
         if nw_property > 0:
             nw_metrics += f"""
-            <div style="flex:1;min-width:120px;text-align:center">
-                <div style="font-size:0.78em;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Property</div>
-                <div style="font-size:1.4em;font-weight:600">{fmt_compact(nw_property)}</div>
+            <div class="nw-item">
+                <div class="nw-label">Property</div>
+                <div class="nw-value">{fmt_compact(nw_property)}</div>
             </div>"""
         if nw_corporate > 0:
             nw_metrics += f"""
-            <div style="flex:1;min-width:120px;text-align:center">
-                <div style="font-size:0.78em;color:var(--muted);text-transform:uppercase;letter-spacing:0.5px">Corporate</div>
-                <div style="font-size:1.4em;font-weight:600">{fmt_compact(nw_corporate)}</div>
+            <div class="nw-item">
+                <div class="nw-label">Corporate</div>
+                <div class="nw-value">{fmt_compact(nw_corporate)}</div>
             </div>"""
         nw_metrics += f"""
-            <div style="flex:1;min-width:120px;text-align:center">
-                <div style="font-size:0.78em;color:var(--accent);text-transform:uppercase;letter-spacing:0.5px;font-weight:600">Total</div>
-                <div style="font-size:1.6em;font-weight:700;color:var(--accent)">{fmt_compact(nw_total)}</div>
+            <div class="nw-item">
+                <div class="nw-label" style="color:var(--accent);font-weight:600">Total</div>
+                <div class="nw-value" style="font-size:1.6em;font-weight:700;color:var(--accent)">{fmt_compact(nw_total)}</div>
             </div>"""
 
         # Stacked bar segments
@@ -938,20 +936,20 @@ def generate_html(data: dict, ai_html: str | None = None,
                 nw_legend_items.append(
                     f'<span style="display:inline-flex;align-items:center;gap:4px;margin-right:14px">'
                     f'<span style="width:10px;height:10px;border-radius:2px;background:{color};display:inline-block"></span>'
-                    f'<span style="font-size:0.8em;color:var(--muted)">{label}</span></span>'
+                    f'<span class="metric-sub" style="font-size:0.8em">{label}</span></span>'
                 )
         nw_legend = "".join(nw_legend_items)
 
         net_worth_card = f"""
-    <div class="card" style="margin-bottom:20px">
-        <h2 style="margin-bottom:15px">Net Worth</h2>
-        <div style="display:flex;align-items:center;justify-content:space-around;flex-wrap:wrap;gap:10px;margin-bottom:18px">
+    <div class="card">
+        <h2>Net Worth</h2>
+        <div class="nw-metrics">
             {nw_metrics}
         </div>
-        <div style="background:#eee;border-radius:6px;height:18px;overflow:hidden;font-size:0;line-height:0;white-space:nowrap">
+        <div class="nw-bar">
             {nw_bar_html}
         </div>
-        <div style="margin-top:8px;text-align:center">{nw_legend}</div>
+        <div class="nw-legend">{nw_legend}</div>
     </div>"""
 
     # ── Overview stats ──
@@ -1063,7 +1061,7 @@ def generate_html(data: dict, ai_html: str | None = None,
 
         summary_html = ""
         if summary_parts:
-            summary_html = '<p style="color:var(--muted);font-style:italic;margin-bottom:18px">' + ". ".join(summary_parts) + ".</p>"
+            summary_html = '<p class="section-desc">' + ". ".join(summary_parts) + ".</p>"
 
         milestones_section = f"""
 <section class="card">
@@ -1080,7 +1078,7 @@ def generate_html(data: dict, ai_html: str | None = None,
         fixed_section = f"""
 <section id="fixed-discretionary" class="card">
     <h2>Fixed vs Discretionary</h2>
-    <p style="color:var(--muted);font-style:italic;margin-bottom:15px">{fixed_pct}% of total spending is fixed (pre-authorized recurring debits)</p>
+    <p class="section-desc">{fixed_pct}% of total spending is fixed (pre-authorized recurring debits)</p>
     <div class="chart-row">
         <div>
             <table class="data-table">
@@ -1123,9 +1121,9 @@ def generate_html(data: dict, ai_html: str | None = None,
         corporate_section = f"""
 <section id="corporate-income" class="card">
     <h2>Corporate Income</h2>
-    <p style="color:var(--muted);font-style:italic;margin-bottom:15px">Revenue from Tall Tree Technology (client payments) and dividends from Britton Holdings Growth (investment portfolio)</p>
+    <p class="section-desc">Revenue from Tall Tree Technology (client payments) and dividends from Britton Holdings Growth (investment portfolio)</p>
     {corp_revenue_warning}
-    <table class="data-table" style="max-width:600px">
+    <table class="data-table table-narrow">
         <thead><tr><th>Month</th><th style="text-align:right">Revenue (Tall Tree)</th><th style="text-align:right">Dividends (BH Growth)</th><th style="text-align:right">Total</th></tr></thead>
         <tbody>{corp_rows}</tbody>
         <tfoot>
@@ -1160,7 +1158,7 @@ def generate_html(data: dict, ai_html: str | None = None,
             txns = etransfer_in_by_month[m]
             month_label = datetime.strptime(m, "%Y-%m").strftime("%b %Y")
             month_total = sum(t["amount"] for t in txns)
-            etransfer_in_rows += f'<tr style="background:var(--bg);font-weight:600"><td colspan="2">{month_label}</td><td style="text-align:right">{money(month_total)}</td></tr>'
+            etransfer_in_rows += f'<tr class="group-header"><td colspan="2">{month_label}</td><td style="text-align:right">{money(month_total)}</td></tr>'
             for t in txns:
                 date_str = str(t["date"])[:10]
                 amt_str = f'{t["amount"]:.2f}'
@@ -1170,8 +1168,8 @@ def generate_html(data: dict, ai_html: str | None = None,
         etransfer_income_section = f"""
 <section id="incoming-etransfers" class="card">
     <h2>Incoming e-Transfers</h2>
-    <p style="color:var(--muted);font-style:italic;margin-bottom:15px">Interac e-Transfer reimbursements received &mdash; {len(incoming_etransfers)} transactions totalling {money(etransfer_in_total)}</p>
-    <table class="data-table" style="max-width:600px">
+    <p class="section-desc">Interac e-Transfer reimbursements received &mdash; {len(incoming_etransfers)} transactions totalling {money(etransfer_in_total)}</p>
+    <table class="data-table table-narrow">
         <thead><tr><th>Date</th><th>Note</th><th style="text-align:right">Amount</th></tr></thead>
         <tbody>{etransfer_in_rows}</tbody>
     </table>
@@ -1191,15 +1189,15 @@ def generate_html(data: dict, ai_html: str | None = None,
             txns = bi_by_month[m]
             month_label = datetime.strptime(m, "%Y-%m").strftime("%b %Y")
             month_total = sum(t["amount"] for t in txns)
-            bi_rows += f'<tr style="background:var(--bg);font-weight:600"><td colspan="2">{month_label}</td><td style="text-align:right">{money(month_total)}</td></tr>'
+            bi_rows += f'<tr class="group-header"><td colspan="2">{month_label}</td><td style="text-align:right">{money(month_total)}</td></tr>'
             for t in sorted(txns, key=lambda x: x["date"], reverse=True):
                 date_str = str(t["date"])[:10]
                 bi_rows += f'<tr><td>{date_str}</td><td>{t["account"]}</td><td style="text-align:right">{money(t["amount"])}</td></tr>'
         bank_interest_section = f"""
 <section id="bank-interest" class="card">
     <h2>Bank Interest</h2>
-    <p style="color:var(--muted);font-style:italic;margin-bottom:15px">Interest earned on cash and savings accounts &mdash; {len(bank_interest)} payments totalling {money(bi_total)}</p>
-    <table class="data-table" style="max-width:600px">
+    <p class="section-desc">Interest earned on cash and savings accounts &mdash; {len(bank_interest)} payments totalling {money(bi_total)}</p>
+    <table class="data-table table-narrow">
         <thead><tr><th>Date</th><th>Account</th><th style="text-align:right">Amount</th></tr></thead>
         <tbody>{bi_rows}</tbody>
     </table>
@@ -1330,7 +1328,7 @@ def generate_html(data: dict, ai_html: str | None = None,
         passive_section = f"""
 <section id="passive-income" class="card">
     <h2>Investment Portfolio</h2>
-    <p style="color:var(--muted);font-style:italic;margin-bottom:15px">Yield and growth from personal investment accounts — accessible and registered holdings</p>
+    <p class="section-desc">Yield and growth from personal investment accounts — accessible and registered holdings</p>
     <h3>Accessible Accounts</h3>
     <table class="data-table" style="max-width:100%">
         <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Income/yr</th><th style="text-align:right">Growth/yr</th><th style="text-align:right">vs Avg</th></tr></thead>
@@ -1410,7 +1408,36 @@ h2 {{ font-size: 1.3em; margin-bottom: 15px; color: var(--accent); border-bottom
 .stat .label {{ font-size: 0.85em; color: var(--muted); margin-top: 5px; }}
 .chart-container {{ position: relative; max-width: 100%; margin: 0 auto; }}
 .chart-row {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }}
-@media (max-width: 768px) {{ .chart-row {{ grid-template-columns: 1fr; }} }}
+@media (max-width: 768px) {{
+    .chart-row {{ grid-template-columns: 1fr; }}
+    .hero-layout {{ gap: 10px; }}
+    .hero-block {{ min-width: 120px; }}
+    .hero-sep {{ flex: 0 0 30px; font-size: 1.4em; }}
+    .metric-value {{ font-size: 1.6em; }}
+    .nw-metrics {{ gap: 6px; }}
+    .nw-item .nw-value {{ font-size: 1.2em; }}
+    .stats {{ grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }}
+    .stat {{ padding: 14px; }}
+    .stat .value {{ font-size: 1.4em; }}
+    .tab-nav {{ padding: 10px 15px; gap: 6px; }}
+    .tab-nav button {{ padding: 6px 12px; font-size: 0.82em; }}
+    .card {{ padding: 18px; }}
+    body {{ padding: 12px; }}
+}}
+@media (max-width: 480px) {{
+    .hero-layout {{ flex-direction: column; align-items: stretch; text-align: center; }}
+    .hero-block {{ min-width: auto; text-align: center !important; }}
+    .hero-sep {{ flex: 0 0 auto; font-size: 1.2em; }}
+    .metric-value {{ font-size: 1.4em; }}
+    .metric-value .unit {{ font-size: 0.5em; }}
+    .nw-metrics {{ flex-direction: column; }}
+    .nw-item {{ min-width: auto; }}
+    .stats {{ grid-template-columns: 1fr 1fr; }}
+    h1 {{ font-size: 1.4em; }}
+    h2 {{ font-size: 1.1em; }}
+    .data-table {{ font-size: 0.8em; }}
+    .data-table th, .data-table td {{ padding: 6px 8px; }}
+}}
 .data-table {{ width: 100%; border-collapse: collapse; font-size: 0.9em; }}
 .data-table th {{ background: var(--bg); padding: 10px 12px; text-align: left; font-weight: 600; position: sticky; top: 0; }}
 .data-table td {{ padding: 8px 12px; border-bottom: 1px solid var(--border); }}
@@ -1440,6 +1467,33 @@ canvas {{ max-width: 100%; }}
 .tab-nav button.active {{ background: var(--accent); color: #fff; }}
 .tab-panel {{ display: none; }}
 .tab-panel.active {{ display: block; }}
+/* Utility classes */
+.text-right {{ text-align: right; }}
+.text-center {{ text-align: center; }}
+.text-muted {{ color: var(--muted); }}
+.text-dim {{ color: #ccc; }}
+.text-positive {{ color: #27ae60; }}
+.text-negative {{ color: #e15759; }}
+.fw-bold {{ font-weight: 600; }}
+.section-desc {{ color: var(--muted); font-style: italic; margin-bottom: 15px; }}
+.metric-label {{ font-size: 0.85em; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }}
+.metric-value {{ font-size: 2.2em; font-weight: 700; }}
+.metric-value .unit {{ font-size: 0.4em; font-weight: 400; color: var(--muted); }}
+.metric-sub {{ font-size: 0.85em; color: var(--muted); }}
+.hero-layout {{ display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 20px; }}
+.hero-block {{ flex: 1; min-width: 160px; }}
+.hero-sep {{ flex: 0 0 40px; text-align: center; font-size: 1.8em; color: var(--muted); }}
+.nw-metrics {{ display: flex; align-items: center; justify-content: space-around; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }}
+.nw-item {{ flex: 1; min-width: 120px; text-align: center; }}
+.nw-item .nw-label {{ font-size: 0.78em; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }}
+.nw-item .nw-value {{ font-size: 1.4em; font-weight: 600; }}
+.nw-bar {{ background: #eee; border-radius: 6px; height: 18px; overflow: hidden; font-size: 0; line-height: 0; white-space: nowrap; }}
+.nw-legend {{ margin-top: 8px; text-align: center; }}
+.progress-bar {{ background: #eee; border-radius: 6px; height: 12px; overflow: hidden; }}
+.progress-fill {{ height: 100%; border-radius: 6px; transition: width 0.3s; }}
+.group-header {{ background: var(--bg); font-weight: 600; }}
+.table-narrow {{ max-width: 600px; }}
+.table-scroll {{ overflow-x: auto; }}
 </style>
 </head>
 <body>
@@ -1476,8 +1530,8 @@ canvas {{ max-width: 100%; }}
 
 <section id="categories" class="card">
     <h2>Category Heatmap</h2>
-    <p style="color:var(--muted);font-style:italic;margin-bottom:15px">Spending intensity by category over the last 6 months, sorted by total. Darker cells = higher spend.</p>
-    <div style="overflow-x:auto">
+    <p class="section-desc">Spending intensity by category over the last 6 months, sorted by total. Darker cells = higher spend.</p>
+    <div class="table-scroll">
     <table class="data-table">
         <thead><tr><th>Category</th>{heatmap_month_headers}<th style="text-align:right">Avg</th><th style="text-align:right">6m Total</th></tr></thead>
         <tbody>{heatmap_rows}</tbody>
@@ -1489,8 +1543,8 @@ canvas {{ max-width: 100%; }}
 
 <section id="subscriptions" class="card">
     <h2>Subscription Audit</h2>
-    <p style="color:var(--muted);font-style:italic;margin-bottom:15px">Recurring charges detected across your statements, grouped by status.</p>
-    <div style="overflow-x:auto">
+    <p class="section-desc">Recurring charges detected across your statements, grouped by status.</p>
+    <div class="table-scroll">
     <table class="data-table">
         <thead><tr><th>Service</th><th style="text-align:right">Avg/Mo</th>{sub_month_headers}</tr></thead>
         <tbody>{sub_rows}</tbody>
@@ -1499,7 +1553,7 @@ canvas {{ max-width: 100%; }}
     </div>
 </section>
 
-{'<section id="interac-transfers" class="card"><h2>Interac e-Transfer Details</h2><p style="color:var(--muted);font-style:italic;margin-bottom:15px">All outgoing e-Transfers &mdash; ' + str(len(etransfer_txns)) + ' transactions totalling ' + money(etransfer_total) + '</p><table class="data-table"><thead><tr><th>Date</th><th>Note</th><th style="text-align:right">Amount</th></tr></thead><tbody>' + etransfer_rows + '</tbody></table></section>' if etransfer_txns else ''}
+{'<section id="interac-transfers" class="card"><h2>Interac e-Transfer Details</h2><p class="section-desc">All outgoing e-Transfers &mdash; ' + str(len(etransfer_txns)) + ' transactions totalling ' + money(etransfer_total) + '</p><table class="data-table"><thead><tr><th>Date</th><th>Note</th><th style="text-align:right">Amount</th></tr></thead><tbody>' + etransfer_rows + '</tbody></table></section>' if etransfer_txns else ''}
 </div>
 
 <!-- ═══ MILESTONES ═══ -->

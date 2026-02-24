@@ -15,6 +15,21 @@ from config import (
     CORPORATE_TAKE_HOME_RATE,
     DEBT_PAYOFF_THRESHOLDS,
     FIXED_COST_MERCHANTS,
+    SUB_MIN_MONTHS,
+    SUB_MIN_AMOUNT,
+    SUB_RETAIL_CV,
+    SUB_RETAIL_MIN_MONTHS,
+    SUB_RETAIL_MAX_CHARGES,
+    SUB_SERVICE_CV_TIGHT,
+    SUB_SERVICE_MIN_MONTHS_TIGHT,
+    SUB_SERVICE_MAX_CHARGES_TIGHT,
+    SUB_SERVICE_CV_LOOSE,
+    SUB_SERVICE_MIN_MONTHS_LOOSE,
+    SUB_SERVICE_MAX_CHARGES_LOOSE,
+    PRICE_MATCH_TOLERANCE,
+    ALTERNATING_RANGE_LIMIT,
+    SIGNIFICANT_VARIATION_RATIO,
+    PRICE_CHANGE_THRESHOLD,
 )
 
 
@@ -86,11 +101,11 @@ def analyze(transactions: list[dict], transfers: dict | None = None,
     subscriptions = []
     for merchant, by_month in merchant_monthly.items():
         present_months = [m for m in months_set if by_month.get(m, 0) > 0]
-        if len(present_months) < 2:
+        if len(present_months) < SUB_MIN_MONTHS:
             continue
         amounts = [by_month[m] for m in present_months]
         avg_amount = sum(amounts) / len(amounts)
-        if avg_amount < 5:
+        if avg_amount < SUB_MIN_AMOUNT:
             continue
 
         # Coefficient of variation (amount consistency)
@@ -115,13 +130,13 @@ def analyze(transactions: list[dict], transfers: dict | None = None,
         elif is_non_sub_category:
             # For retail/dining/grocery categories, require very tight consistency
             # and more months of evidence (catches barbershop, excludes one-off shops)
-            if cv < 0.10 and len(present_months) >= 4 and avg_charges <= 1.2:
+            if cv < SUB_RETAIL_CV and len(present_months) >= SUB_RETAIL_MIN_MONTHS and avg_charges <= SUB_RETAIL_MAX_CHARGES:
                 is_subscription = True
         else:
             # For service-like categories (telecom, health, insurance, etc.)
-            if cv < 0.20 and len(present_months) >= 3 and avg_charges <= 1.3:
+            if cv < SUB_SERVICE_CV_TIGHT and len(present_months) >= SUB_SERVICE_MIN_MONTHS_TIGHT and avg_charges <= SUB_SERVICE_MAX_CHARGES_TIGHT:
                 is_subscription = True
-            elif cv < 0.40 and len(present_months) >= 4 and avg_charges <= 1.2:
+            elif cv < SUB_SERVICE_CV_LOOSE and len(present_months) >= SUB_SERVICE_MIN_MONTHS_LOOSE and avg_charges <= SUB_SERVICE_MAX_CHARGES_LOOSE:
                 is_subscription = True
 
         if not is_subscription:
@@ -141,21 +156,21 @@ def analyze(transactions: list[dict], transfers: dict | None = None,
             for a in amounts:
                 matched = False
                 for u in unique_approx:
-                    if abs(a - u) / u < 0.10:
+                    if abs(a - u) / u < PRICE_MATCH_TOLERANCE:
                         matched = True
                         break
                 if not matched:
                     unique_approx.add(a)
-            if len(unique_approx) <= 2 and max_a / min_a < 1.5:
+            if len(unique_approx) <= 2 and max_a / min_a < ALTERNATING_RANGE_LIMIT:
                 # Alternating pattern — just note the range
-                if max_a / min_a > 1.20:
+                if max_a / min_a > SIGNIFICANT_VARIATION_RATIO:
                     alerts.append(f"Varies ${min_a:.2f} – ${max_a:.2f}")
                     status = "price_change"
             else:
                 # True price changes — flag significant jumps
                 for i in range(1, len(amounts)):
                     prev_a, curr_a = amounts[i-1], amounts[i]
-                    if prev_a > 0 and abs(curr_a - prev_a) / prev_a > 0.20:
+                    if prev_a > 0 and abs(curr_a - prev_a) / prev_a > PRICE_CHANGE_THRESHOLD:
                         direction = "increased" if curr_a > prev_a else "decreased"
                         alerts.append(f"${prev_a:.2f} \u2192 ${curr_a:.2f} ({direction})")
                         status = "price_change"
