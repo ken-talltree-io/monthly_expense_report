@@ -2505,6 +2505,144 @@ def generate_html(data: dict, ai_html: str | None = None,
     combined_monthly = monthly_passive + corp_monthly_takehome + other_income_monthly
     has_income = passive_income or corporate_income or incoming_etransfers or bank_interest
 
+    # ── Per-month income totals (for savings rate) ──
+    income_by_month = {}
+    # Bucket e-transfers by month
+    etransfer_by_month = defaultdict(float)
+    for t in (incoming_etransfers or []):
+        m_key = str(t["date"])[:7]
+        etransfer_by_month[m_key] += t["amount"]
+    # Bucket bank interest by month
+    bank_int_by_month = defaultdict(float)
+    for t in (bank_interest or []):
+        m_key = str(t["date"])[:7]
+        bank_int_by_month[m_key] += t["amount"]
+    for m in months:
+        corp_rev = corporate_income["revenue_monthly"].get(m, 0) * CORPORATE_TAKE_HOME_RATE if corporate_income else 0
+        corp_div = corporate_income["dividends_monthly"].get(m, 0) if corporate_income else 0
+        passive_m = monthly_passive  # spread evenly
+        etransfer_m = etransfer_by_month.get(m, 0)
+        bank_int_m = bank_int_by_month.get(m, 0)
+        income_by_month[m] = corp_rev + corp_div + passive_m + etransfer_m + bank_int_m
+
+    # ── Savings rate per month ──
+    savings_rate_by_month = {}
+    savings_dollars_by_month = {}
+    for m in months:
+        inc = income_by_month[m]
+        spend = adjusted_monthly[m]
+        savings = inc - spend
+        savings_dollars_by_month[m] = savings
+        savings_rate_by_month[m] = round((savings / inc * 100), 1) if inc > 0 else 0
+
+    savings_rates_list = [savings_rate_by_month[m] for m in months]
+    savings_avg = round(sum(savings_rates_list) / len(savings_rates_list), 1) if savings_rates_list else 0
+    trailing_3_rates = savings_rates_list[-3:]
+    savings_3mo_avg = round(sum(trailing_3_rates) / len(trailing_3_rates), 1) if trailing_3_rates else 0
+    savings_current = savings_rates_list[-1] if savings_rates_list else 0
+    savings_best_rate = max(savings_rates_list) if savings_rates_list else 0
+    savings_best_month = months[savings_rates_list.index(savings_best_rate)] if savings_rates_list else ""
+
+    # ── Savings rate section HTML ──
+    def _sr_color(rate):
+        return "#27ae60" if rate >= 0 else "#e74c3c"
+
+    savings_best_label = datetime.strptime(savings_best_month, "%Y-%m").strftime("%b %Y") if savings_best_month else ""
+    savings_rate_section = ""
+    if has_income:
+        sr_chart_labels = json.dumps(month_labels)
+        sr_chart_data = json.dumps(savings_rates_list)
+        sr_income_data = json.dumps([round(income_by_month[m], 2) for m in months])
+        sr_spending_data = json.dumps([round(adjusted_monthly[m], 2) for m in months])
+        sr_savings_data = json.dumps([round(savings_dollars_by_month[m], 2) for m in months])
+
+        savings_rate_section = f"""
+    <div class="card" style="margin-bottom:20px">
+        <h2>Savings Rate</h2>
+        <p style="color:var(--muted);font-style:italic;margin-bottom:15px">Percentage of income retained each month. Savings rate = (income &minus; spending) &divide; income.</p>
+        <div class="stats" style="margin-bottom:20px">
+            <div class="stat">
+                <div class="value" style="color:{_sr_color(savings_current)}">{savings_current:+.1f}%</div>
+                <div class="label">Current Month</div>
+            </div>
+            <div class="stat">
+                <div class="value" style="color:{_sr_color(savings_3mo_avg)}">{savings_3mo_avg:+.1f}%</div>
+                <div class="label">3-Month Avg</div>
+            </div>
+            <div class="stat">
+                <div class="value" style="color:{_sr_color(savings_avg)}">{savings_avg:+.1f}%</div>
+                <div class="label">Overall Avg</div>
+            </div>
+            <div class="stat">
+                <div class="value" style="color:#27ae60">{savings_best_rate:+.1f}%</div>
+                <div class="label">Best ({savings_best_label})</div>
+            </div>
+        </div>
+        <div class="chart-container">
+            <canvas id="savingsRateChart" height="100"></canvas>
+        </div>
+    </div>"""
+
+        sr_avg_line = json.dumps([savings_avg] * len(months))
+        savings_rate_chart_js = f"""
+    new Chart(document.getElementById('savingsRateChart'), {{
+        type: 'line',
+        data: {{
+            labels: {sr_chart_labels},
+            datasets: [{{
+                label: 'Savings Rate',
+                data: {sr_chart_data},
+                borderColor: '#27ae60',
+                backgroundColor: 'rgba(39, 174, 96, 0.1)',
+                fill: true,
+                tension: 0.3,
+                pointRadius: 4,
+                pointBackgroundColor: {sr_chart_data}.map(v => v >= 0 ? '#27ae60' : '#e74c3c'),
+                pointBorderColor: {sr_chart_data}.map(v => v >= 0 ? '#27ae60' : '#e74c3c'),
+                borderWidth: 2
+            }}, {{
+                label: 'Average ({savings_avg}%)',
+                data: {sr_avg_line},
+                borderColor: 'rgba(39, 174, 96, 0.5)',
+                borderDash: [6, 4],
+                fill: false,
+                pointRadius: 0,
+                borderWidth: 2
+            }}]
+        }},
+        options: {{
+            responsive: true,
+            plugins: {{
+                legend: {{ position: 'bottom' }},
+                tooltip: {{
+                    callbacks: {{
+                        label: function(ctx) {{
+                            if (ctx.datasetIndex === 1) return 'Average: ' + ctx.parsed.y.toFixed(1) + '%';
+                            var idx = ctx.dataIndex;
+                            var inc = {sr_income_data}[idx];
+                            var spend = {sr_spending_data}[idx];
+                            var sav = {sr_savings_data}[idx];
+                            return [
+                                'Savings Rate: ' + ctx.parsed.y.toFixed(1) + '%',
+                                'Income: $' + inc.toLocaleString(undefined, {{minimumFractionDigits: 0, maximumFractionDigits: 0}}),
+                                'Spending: $' + spend.toLocaleString(undefined, {{minimumFractionDigits: 0, maximumFractionDigits: 0}}),
+                                'Saved: $' + sav.toLocaleString(undefined, {{minimumFractionDigits: 0, maximumFractionDigits: 0}})
+                            ];
+                        }}
+                    }}
+                }}
+            }},
+            scales: {{
+                y: {{
+                    ticks: {{
+                        callback: function(v) {{ return v + '%'; }}
+                    }}
+                }}
+            }}
+        }}
+    }});"""
+    else:
+        savings_rate_chart_js = ""
 
     # Combined sustainability metrics (passive + corporate income vs burn rate)
     if combined_monthly > 0 and burn_rate > 0:
@@ -3352,6 +3490,7 @@ canvas {{ max-width: 100%; }}
 <div class="stats">
     {overview_stats}
 </div>
+{savings_rate_section}
 
 </div>
 
@@ -3460,6 +3599,8 @@ document.addEventListener('DOMContentLoaded', function() {{
     {fixed_chart_js}
 
     {sustainability_chart_js}
+
+    {savings_rate_chart_js}
 
 }});
 </script>
