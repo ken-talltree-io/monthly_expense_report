@@ -21,8 +21,10 @@ from config import (
     CATEGORY_CONSOLIDATION,
     CASHBACK_RATE,
     CORPORATE_TAKE_HOME_RATE,
+    ANOMALY_TXN_ZSCORE,
+    ANOMALY_NEW_MERCHANT_MIN,
 )
-from analysis import analyze, get_ai_recommendations
+from analysis import analyze, detect_anomalies, get_ai_recommendations
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -575,6 +577,114 @@ class TestCSVLoaders:
         result = config.load_budgets(str(tmp_path))
         assert "# Draft" not in result
         assert result["Real Category"] == 300.0
+
+
+# ── Anomaly detection ────────────────────────────────────────────────────
+
+
+class TestAnomalyDetection:
+    """Verifies statistical outlier detection for transactions and categories."""
+
+    def test_large_transaction_flagged(self):
+        """A transaction with z-score > 2.0 should be flagged."""
+        months = _months(6)
+        # 5 normal transactions + 1 outlier across 6 months
+        txns = [
+            _txn("Store A", 50, months[0], "Shopping"),
+            _txn("Store A", 50, months[1], "Shopping"),
+            _txn("Store A", 50, months[2], "Shopping"),
+            _txn("Store A", 50, months[3], "Shopping"),
+            _txn("Store A", 50, months[4], "Shopping"),
+            _txn("Store A", 500, months[5], "Shopping"),  # outlier
+        ]
+        result = analyze(txns)
+        large = [a for a in result["anomalies"] if a["type"] == "large_transaction"]
+        assert len(large) >= 1
+        assert large[0]["amount"] == 500
+        assert large[0]["merchant"] == "Store A"
+
+    def test_normal_transactions_not_flagged(self):
+        """Consistent amounts should produce no large transaction anomalies."""
+        months = _months(6)
+        txns = [_txn("Store A", 50, m, "Shopping") for m in months]
+        result = analyze(txns)
+        large = [a for a in result["anomalies"] if a["type"] == "large_transaction"]
+        assert len(large) == 0
+
+    def test_category_spike_detected(self):
+        """A month with spending > 1.5 std devs above mean flags a category spike."""
+        months = _months(4)
+        txns = [
+            _txn("Store A", 100, months[0], "Shopping"),
+            _txn("Store A", 110, months[1], "Shopping"),
+            _txn("Store A", 90, months[2], "Shopping"),
+            _txn("Store A", 500, months[3], "Shopping"),  # spike
+        ]
+        result = analyze(txns)
+        spikes = [a for a in result["anomalies"] if a["type"] == "category_spike"]
+        assert len(spikes) >= 1
+        assert spikes[0]["category"] == "Shopping"
+
+    def test_category_with_few_months_skipped(self):
+        """Categories with < 3 months of history should not generate spikes."""
+        months = _months(2)
+        txns = [
+            _txn("Store A", 100, months[0], "Shopping"),
+            _txn("Store A", 500, months[1], "Shopping"),  # big but only 2 months
+        ]
+        result = analyze(txns)
+        spikes = [a for a in result["anomalies"] if a["type"] == "category_spike"]
+        assert len(spikes) == 0
+
+    def test_new_high_spend_merchant_flagged(self):
+        """A merchant appearing only in last 2 months with >= $200 total is flagged."""
+        months = _months(4)
+        txns = [_txn("Old Store", 100, m, "Shopping") for m in months]
+        # New merchant only in last 2 months with $250 total
+        txns.append(_txn("New Expensive", 150, months[-2], "Shopping"))
+        txns.append(_txn("New Expensive", 100, months[-1], "Shopping"))
+        result = analyze(txns)
+        new_merch = [a for a in result["anomalies"] if a["type"] == "new_merchant"]
+        assert len(new_merch) >= 1
+        assert new_merch[0]["merchant"] == "New Expensive"
+        assert new_merch[0]["amount"] == 250
+
+    def test_new_cheap_merchant_not_flagged(self):
+        """A new merchant spending < $200 should not be flagged."""
+        months = _months(4)
+        txns = [_txn("Old Store", 100, m, "Shopping") for m in months]
+        txns.append(_txn("New Cheap", 50, months[-1], "Shopping"))
+        result = analyze(txns)
+        new_merch = [a for a in result["anomalies"] if a["type"] == "new_merchant"]
+        new_cheap = [a for a in new_merch if a["merchant"] == "New Cheap"]
+        assert len(new_cheap) == 0
+
+    def test_anomalies_key_always_present(self):
+        """The 'anomalies' key should always be in the analyze() result."""
+        txns = [_txn("Store", 100, "2025-10", "Shopping")]
+        result = analyze(txns)
+        assert "anomalies" in result
+        assert isinstance(result["anomalies"], list)
+
+    def test_severity_levels_correct(self):
+        """Extreme outliers (z > 3.0) should be 'alert', others 'warning'."""
+        months = _months(12)
+        # 11 normal + 1 extreme gives z ≈ √11 ≈ 3.3 → alert
+        txns = [_txn("Store A", 50, m, "Shopping") for m in months[:11]]
+        txns.append(_txn("Store A", 5000, months[11], "Shopping"))
+        result = analyze(txns)
+        large = [a for a in result["anomalies"] if a["type"] == "large_transaction"]
+        assert len(large) >= 1
+        assert large[0]["severity"] == "alert"
+
+        # Moderate outlier with 6 data points — z ≈ √5 ≈ 2.24 → warning
+        months6 = _months(6)
+        txns2 = [_txn("Store B", 50, m, "Shopping") for m in months6[:5]]
+        txns2.append(_txn("Store B", 5000, months6[5], "Shopping"))
+        result2 = analyze(txns2)
+        large2 = [a for a in result2["anomalies"] if a["type"] == "large_transaction"]
+        assert len(large2) >= 1
+        assert large2[0]["severity"] == "warning"
 
 
 # ── AI recommendations (mocked API) ──────────────────────────────────────

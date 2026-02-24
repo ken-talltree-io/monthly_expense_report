@@ -30,7 +30,106 @@ from config import (
     ALTERNATING_RANGE_LIMIT,
     SIGNIFICANT_VARIATION_RATIO,
     PRICE_CHANGE_THRESHOLD,
+    ANOMALY_TXN_ZSCORE,
+    ANOMALY_CATEGORY_SPIKE_STDEV,
+    ANOMALY_NEW_MERCHANT_MIN,
+    ANOMALY_MIN_HISTORY_MONTHS,
 )
+
+
+# ── Anomaly Detection ────────────────────────────────────────────────────────
+
+def detect_anomalies(transactions, months, category_monthly, merchant_monthly):
+    """Detect statistical outliers: large transactions, category spikes, new high-spend merchants.
+
+    Returns a list of anomaly dicts sorted by severity then amount, capped at 15.
+    """
+    anomalies = []
+
+    # Build per-merchant transaction lists for z-score analysis
+    merchant_txns = defaultdict(list)
+    for t in transactions:
+        merchant_txns[t["merchant"]].append(t)
+
+    # 1. Large transactions — per-merchant z-score > threshold
+    for merchant, txns in merchant_txns.items():
+        # Need >= 3 transactions across >= 3 months
+        txn_months = {t["month"] for t in txns}
+        if len(txns) < 3 or len(txn_months) < ANOMALY_MIN_HISTORY_MONTHS:
+            continue
+        amounts = [t["amount"] for t in txns]
+        mean = sum(amounts) / len(amounts)
+        variance = sum((a - mean) ** 2 for a in amounts) / len(amounts)
+        std_dev = variance ** 0.5
+        if std_dev == 0:
+            continue
+        for t in txns:
+            z = (t["amount"] - mean) / std_dev
+            if z > ANOMALY_TXN_ZSCORE:
+                anomalies.append({
+                    "type": "large_transaction",
+                    "description": f"{merchant}: ${t['amount']:,.2f} is {z:.1f}σ above avg ${mean:,.2f}",
+                    "amount": t["amount"],
+                    "date": t["date"],
+                    "severity": "alert" if z > 3.0 else "warning",
+                    "category": t["category"],
+                    "merchant": merchant,
+                })
+
+    # 2. Category spikes — monthly total > threshold std devs above category mean
+    for category, by_month in category_monthly.items():
+        month_vals = [by_month.get(m, 0) for m in months]
+        if len(months) < ANOMALY_MIN_HISTORY_MONTHS:
+            continue
+        mean = sum(month_vals) / len(month_vals)
+        variance = sum((v - mean) ** 2 for v in month_vals) / len(month_vals)
+        std_dev = variance ** 0.5
+        if std_dev == 0:
+            continue
+        for m, val in zip(months, month_vals):
+            z = (val - mean) / std_dev
+            if z > ANOMALY_CATEGORY_SPIKE_STDEV:
+                anomalies.append({
+                    "type": "category_spike",
+                    "description": f"{category} in {m}: ${val:,.2f} is {z:.1f}σ above avg ${mean:,.2f}/mo",
+                    "amount": val,
+                    "date": None,
+                    "severity": "alert" if z > 2.5 else "warning",
+                    "category": category,
+                    "merchant": None,
+                })
+
+    # 3. New high-spend merchants — first appearance in last 2 months, total >= threshold
+    if len(months) >= 2:
+        last_2 = set(months[-2:])
+        earlier = set(months[:-2])
+        for merchant, by_month in merchant_monthly.items():
+            merchant_months = {m for m, v in by_month.items() if v > 0}
+            # First appearance must be in last 2 months (no earlier history)
+            if not merchant_months.issubset(last_2) or merchant_months & earlier:
+                continue
+            total_spend = sum(by_month.get(m, 0) for m in last_2)
+            if total_spend >= ANOMALY_NEW_MERCHANT_MIN:
+                # Find category from transactions
+                cat = "Uncategorized"
+                for t in transactions:
+                    if t["merchant"] == merchant:
+                        cat = t["category"]
+                        break
+                anomalies.append({
+                    "type": "new_merchant",
+                    "description": f"New merchant {merchant}: ${total_spend:,.2f} in first {'2 months' if len(merchant_months) == 2 else 'month'}",
+                    "amount": total_spend,
+                    "date": None,
+                    "severity": "warning",
+                    "category": cat,
+                    "merchant": merchant,
+                })
+
+    # Sort by severity (alert first) then amount descending, cap at 15
+    severity_order = {"alert": 0, "warning": 1}
+    anomalies.sort(key=lambda a: (severity_order.get(a["severity"], 2), -a["amount"]))
+    return anomalies[:15]
 
 
 # ── Analysis ─────────────────────────────────────────────────────────────────
@@ -223,6 +322,8 @@ def analyze(transactions: list[dict], transfers: dict | None = None,
         key=lambda x: x[1], reverse=True
     )
 
+    anomalies = detect_anomalies(transactions, months_set, category_monthly, merchant_monthly)
+
     return {
         "months": months_set,
         "total": round(total, 2),
@@ -240,6 +341,7 @@ def analyze(transactions: list[dict], transfers: dict | None = None,
         "discretionary_total": round(total - fixed_total, 2),
         "source_breakdown": {s: {m: round(source_monthly[s].get(m, 0), 2) for m in months_set} for s in source_monthly},
         "debt_payoffs": debt_payoffs,
+        "anomalies": anomalies,
     }
 
 

@@ -409,6 +409,89 @@ def generate_html(data: dict, ai_html: str | None = None,
     </div>
 </section>"""
 
+    # ── Budget Tracker data prep ──
+    budget_tracker_html = ""
+    if budgets:
+        current_month = datetime.now().strftime("%Y-%m")
+        # Use completed months only (exclude current partial month) for 3-month rolling avg
+        completed_months = [m for m in months if m != current_month]
+        avg_months = completed_months[-3:] if len(completed_months) >= 3 else completed_months
+
+        bt_rows_data = []
+        on_track = 0
+        for category, target in budgets.items():
+            if not avg_months:
+                continue
+            cat_vals = [data["category_monthly"].get(category, {}).get(m, 0) for m in avg_months]
+            avg_3mo = sum(cat_vals) / len(cat_vals)
+            pct = avg_3mo / target * 100 if target > 0 else 0
+            overspend = pct - 100
+            if pct <= 105:
+                on_track += 1
+            # Sparkline over all months
+            all_vals = [data["category_monthly"].get(category, {}).get(m, 0) for m in months]
+            spark = sparkline(all_vals)
+            bar = budget_bar(avg_3mo, target)
+            bt_rows_data.append((overspend, category, avg_3mo, bar, spark))
+
+        # Sort by overspend severity (most over-budget first)
+        bt_rows_data.sort(key=lambda x: x[0], reverse=True)
+        bt_rows = ""
+        for _, cat, avg_val, bar, spark in bt_rows_data:
+            bt_rows += f"<tr><td>{cat}</td><td style='text-align:right'>{money(avg_val)}</td><td>{bar}</td><td>{spark}</td></tr>"
+
+        total_cats = len(bt_rows_data)
+        summary = f"{on_track} of {total_cats} categories on track"
+        avg_label = f"{len(avg_months)}-month avg" if avg_months else "avg"
+        budget_tracker_html = f"""
+<section id="budget-tracker" class="card">
+    <h2>Budget Tracker</h2>
+    <p class="section-desc">All budgeted categories vs target ({avg_label}, excludes current partial month). {summary}.</p>
+    <div class="table-scroll">
+    <table class="data-table">
+        <thead><tr><th>Category</th><th style="text-align:right">{avg_label.title()}</th><th>vs Budget</th><th>Trend</th></tr></thead>
+        <tbody>{bt_rows}</tbody>
+    </table>
+    </div>
+</section>"""
+
+    # ── Anomaly Detection section ──
+    anomaly_html = ""
+    anomalies = data.get("anomalies", [])
+    if anomalies:
+        def severity_badge(severity):
+            if severity == "alert":
+                return '<span style="background:#e15759;color:#fff;padding:2px 8px;border-radius:12px;font-size:0.8em;font-weight:600">Alert</span>'
+            return '<span style="background:#f39c12;color:#fff;padding:2px 8px;border-radius:12px;font-size:0.8em;font-weight:600">Warning</span>'
+
+        def type_label(atype):
+            labels = {"large_transaction": "Large Txn", "category_spike": "Category Spike", "new_merchant": "New Merchant"}
+            return labels.get(atype, atype)
+
+        anom_rows = ""
+        for a in anomalies:
+            date_str = str(a["date"])[:10] if a["date"] else "\u2014"
+            anom_rows += (
+                f"<tr>"
+                f"<td>{severity_badge(a['severity'])}</td>"
+                f"<td><span style='background:#eee;padding:2px 6px;border-radius:4px;font-size:0.8em'>{type_label(a['type'])}</span></td>"
+                f"<td>{a['description']}</td>"
+                f"<td style='text-align:right'>{money(a['amount'])}</td>"
+                f"<td style='text-align:center'>{date_str}</td>"
+                f"</tr>"
+            )
+        anomaly_html = f"""
+<section id="anomalies" class="card">
+    <h2>Spending Anomalies</h2>
+    <p class="section-desc">Statistical outliers detected in your spending — unusually large transactions, category spikes, and new high-spend merchants.</p>
+    <div class="table-scroll">
+    <table class="data-table">
+        <thead><tr><th>Severity</th><th>Type</th><th>Description</th><th style="text-align:right">Amount</th><th style="text-align:center">Date</th></tr></thead>
+        <tbody>{anom_rows}</tbody>
+    </table>
+    </div>
+</section>"""
+
     # Trend indicator
     trend_arrow = "\u2191" if data["mom_change"] > 0 else "\u2193" if data["mom_change"] < 0 else "\u2192"
     trend_color = "#e74c3c" if data["mom_change"] > 5 else "#27ae60" if data["mom_change"] < -5 else "#f39c12"
@@ -1528,6 +1611,8 @@ canvas {{ max-width: 100%; }}
 
 {spotlight_html}
 
+{budget_tracker_html}
+
 <section id="categories" class="card">
     <h2>Category Heatmap</h2>
     <p class="section-desc">Spending intensity by category over the last 6 months, sorted by total. Darker cells = higher spend.</p>
@@ -1538,6 +1623,8 @@ canvas {{ max-width: 100%; }}
     </table>
     </div>
 </section>
+
+{anomaly_html}
 
 {fixed_section}
 
