@@ -281,10 +281,26 @@ def generate_html(data: dict, ai_html: str | None = None,
 
         merchant_rows = ""
         for merch_name, merch_total in top_merchants:
-            merchant_rows += f"<tr><td>{merch_name}</td><td style='text-align:right'>{money(merch_total)}</td></tr>"
+            merch_label = merch_name
+            if merch_name == "Interac e-Transfer":
+                et_notes_list = []
+                for tx in cat_txns:
+                    if tx["merchant"] == "Interac e-Transfer":
+                        et_n = etransfer_notes.get((str(tx['date'])[:10], f'{tx["amount"]:.2f}'), "")
+                        if et_n and et_n not in et_notes_list:
+                            et_notes_list.append(et_n)
+                if et_notes_list:
+                    notes_html = ", ".join(et_notes_list)
+                    merch_label += f'<br><span style="color:var(--muted);font-style:italic;font-size:0.85em">{notes_html}</span>'
+            merchant_rows += f"<tr><td>{merch_label}</td><td style='text-align:right'>{money(merch_total)}</td></tr>"
         txn_rows = ""
         for tx in top_txns:
-            txn_rows += f"<tr><td>{tx['merchant']}</td><td style='text-align:center'>{tx['date'].strftime('%b %d')}</td><td style='text-align:right'>{money(tx['amount'])}</td></tr>"
+            tx_label = tx['merchant']
+            if tx['merchant'] == "Interac e-Transfer":
+                et_note = etransfer_notes.get((str(tx['date'])[:10], f'{tx["amount"]:.2f}'), "")
+                if et_note:
+                    tx_label += f'<br><span style="color:var(--muted);font-style:italic;font-size:0.85em">{et_note}</span>'
+            txn_rows += f"<tr><td>{tx_label}</td><td style='text-align:center'>{tx['date'].strftime('%b %d')}</td><td style='text-align:right'>{money(tx['amount'])}</td></tr>"
 
         # Anomaly badges for this category
         cat_anomalies = anomalies_by_cat.get(c, [])
@@ -348,7 +364,9 @@ def generate_html(data: dict, ai_html: str | None = None,
     heatmap_tfoot = (
         f'<tfoot><tr style="font-weight:700"><td>Total</td>{hm_total_cells}'
         f'<td style="text-align:right">{money(hm_grand_avg)}</td>'
-        f'<td style="text-align:right">{money(hm_grand_total)}</td></tr></tfoot>'
+        f'<td style="text-align:right">{money(hm_grand_total)}</td></tr>'
+        f'<tr style="color:var(--muted);font-size:0.85em"><td colspan="{len(heatmap_months) + 3}" style="text-align:right;padding-top:2px">Avg/Total over last 6 months (unadjusted)</td></tr>'
+        f'</tfoot>'
     )
 
     # (Anomalies are now integrated into the Category Heatmap drill-down)
@@ -385,10 +403,10 @@ def generate_html(data: dict, ai_html: str | None = None,
         </section>"""
 
     # ── Income vs burn rate (the main story) ──
-    monthly_passive = passive_income["monthly_income"] if passive_income else 0
-    annual_passive = passive_income["annual_income"] if passive_income else 0
+    acc_monthly_passive = passive_income["monthly_income"] if passive_income else 0
     registered_monthly = passive_income["registered_monthly"] if passive_income else 0
-    registered_annual = passive_income["registered_annual"] if passive_income else 0
+    monthly_passive = acc_monthly_passive + registered_monthly
+    annual_passive = (passive_income["annual_income"] if passive_income else 0) + (passive_income["registered_annual"] if passive_income else 0)
 
     # Corporate income components — trailing 3-month average (same window as burn rate)
     if corporate_income:
@@ -1232,14 +1250,16 @@ def generate_html(data: dict, ai_html: str | None = None,
         income_tab_stats += """
 </div>"""
 
-    # ── Income Detail section (unified) ──
-    income_detail_section = ""
-    if corporate_income or incoming_etransfers or bank_interest:
-        _id_parts = ""
-        if corporate_income:
-            _id_parts += f"""
-    <h3>Corporate Income</h3>
-    <p class="section-desc">Revenue from Tall Tree Technology + dividends from Britton Holdings Growth</p>
+    # ── Corporate Income section ──
+    corporate_section = ""
+    if corporate_income:
+        corporate_section = f"""
+<section id="corporate-income" class="card">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap">
+        <h2 style="margin-bottom:0">Corporate Income</h2>
+        <div style="font-size:1.3em;font-weight:700;color:#27ae60">{money(corp_monthly_takehome)}<span style="font-size:0.55em;font-weight:400;color:var(--muted)">/mo take-home</span></div>
+    </div>
+    <p class="section-desc">Revenue from Tall Tree Technology (client payments) and dividends from Britton Holdings Growth (investment portfolio)</p>
     {corp_revenue_warning}
     <table class="data-table table-narrow">
         <thead><tr><th>Month</th><th style="text-align:right">Revenue (Tall Tree)</th><th style="text-align:right">Dividends (BH Growth)</th><th style="text-align:right">Total</th></tr></thead>
@@ -1248,28 +1268,56 @@ def generate_html(data: dict, ai_html: str | None = None,
             <tr style="font-weight:700"><td>Total</td><td style="text-align:right">{money(corporate_income['revenue_total'])}</td><td style="text-align:right">{money(corporate_income['dividends_total'])}</td><td style="text-align:right">{money(corporate_income['total_income'])}</td></tr>
             <tr style="color:var(--muted)"><td>Trailing Avg (3-mo)</td><td style="text-align:right">{money(corp_revenue_avg)}</td><td style="text-align:right">{money(corp_div_avg)}</td><td style="text-align:right">{money(corp_trailing_total_avg)}</td></tr>
         </tfoot>
-    </table>"""
-        if incoming_etransfers:
-            _id_parts += f"""
-    <h3>Incoming e-Transfers</h3>
-    <p class="section-desc">{len(incoming_etransfers)} transactions totalling {money(etransfer_in_total)}</p>
+    </table>
+</section>"""
+
+    # ── Other Income section (e-transfers + bank interest in one table) ──
+    other_income_section = ""
+    if incoming_etransfers or bank_interest:
+        other_txns = []
+        for t in incoming_etransfers:
+            date_str = str(t["date"])[:10]
+            amt_str = f'{t["amount"]:.2f}'
+            note = etransfer_in_notes.get((date_str, amt_str), "") if incoming_etransfers else ""
+            other_txns.append((t["date"], "e-Transfer", note, t["amount"]))
+        for t in bank_interest:
+            other_txns.append((t["date"], "Interest", t["account"], t["amount"]))
+        other_txns.sort(key=lambda x: x[0], reverse=True)
+        other_total = etransfer_in_total + bi_total
+        other_count = len(incoming_etransfers) + len(bank_interest)
+
+        def _other_row(t):
+            date_str = str(t[0])[:10]
+            source = t[1]
+            detail = t[2]
+            detail_html = f'<span style="color:var(--muted);font-style:italic">{detail}</span>' if detail else ""
+            return f'<td>{date_str}</td><td>{source}</td><td>{detail_html}</td><td style="text-align:right">{money(t[3])}</td>'
+        # Wrap in list of dicts so month_grouped_rows can process them
+        other_wrapped = [{"date": t[0], "amount": t[3], "_row": t} for t in other_txns]
+        by_month = {}
+        for ow in other_wrapped:
+            m = str(ow["date"])[:7]
+            by_month.setdefault(m, []).append(ow)
+        other_rows = ""
+        for m in sorted(by_month, reverse=True):
+            month_txns = by_month[m]
+            label = datetime.strptime(m, "%Y-%m").strftime("%b %Y")
+            total = sum(ow["amount"] for ow in month_txns)
+            other_rows += f'<tr class="group-header"><td colspan="3">{label}</td><td style="text-align:right">{money(total)}</td></tr>'
+            for ow in sorted(month_txns, key=lambda x: x["date"], reverse=True):
+                other_rows += f'<tr>{_other_row(ow["_row"])}</tr>'
+
+        other_income_section = f"""
+<section id="other-income" class="card">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap">
+        <h2 style="margin-bottom:0">Other Income</h2>
+        <div style="font-size:1.3em;font-weight:700;color:#27ae60">{money(other_income_monthly)}<span style="font-size:0.55em;font-weight:400;color:var(--muted)">/mo avg</span></div>
+    </div>
+    <p class="section-desc">e-Transfer reimbursements and bank interest &mdash; {other_count} transactions totalling {money(other_total)}</p>
     <table class="data-table table-narrow">
-        <thead><tr><th>Date</th><th>Note</th><th style="text-align:right">Amount</th></tr></thead>
-        <tbody>{etransfer_in_rows}</tbody>
-    </table>"""
-        if bank_interest:
-            _id_parts += f"""
-    <h3>Bank Interest</h3>
-    <p class="section-desc">{len(bank_interest)} payments totalling {money(bi_total)}</p>
-    <table class="data-table table-narrow">
-        <thead><tr><th>Date</th><th>Account</th><th style="text-align:right">Amount</th></tr></thead>
-        <tbody>{bi_rows}</tbody>
-    </table>"""
-        income_detail_section = f"""
-<section id="income-detail" class="card">
-    <h2>Income Detail</h2>
-    <p class="section-desc">Monthly breakdown of all income sources</p>
-    {_id_parts}
+        <thead><tr><th>Date</th><th>Source</th><th>Detail</th><th style="text-align:right">Amount</th></tr></thead>
+        <tbody>{other_rows}</tbody>
+    </table>
 </section>"""
 
     # ── Passive Income section ──
@@ -1394,9 +1442,13 @@ def generate_html(data: dict, ai_html: str | None = None,
         </tfoot>
     </table>"""
 
+        portfolio_monthly = acc_monthly + registered_monthly
         passive_section = f"""
 <section id="passive-income" class="card">
-    <h2>Investment Portfolio</h2>
+    <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap">
+        <h2 style="margin-bottom:0">Investment Portfolio</h2>
+        <div style="font-size:1.3em;font-weight:700;color:#27ae60">{money(portfolio_monthly)}<span style="font-size:0.55em;font-weight:400;color:var(--muted)">/mo income</span></div>
+    </div>
     <p class="section-desc">Yield and growth from personal investment accounts — accessible and registered holdings</p>
     <h3>Accessible Accounts</h3>
     <table class="data-table" style="max-width:100%">
@@ -1585,13 +1637,13 @@ canvas {{ max-width: 100%; }}
 </div>
 
 <!-- ═══ INCOME ═══ -->
-{'<div class="tab-panel" id="tab-income">' + income_tab_stats + passive_section + income_detail_section + '</div>' if (corporate_income or passive_income or incoming_etransfers or bank_interest) else ''}
+{'<div class="tab-panel" id="tab-income">' + income_tab_stats + corporate_section + passive_section + other_income_section + '</div>' if (corporate_income or passive_income or incoming_etransfers or bank_interest) else ''}
 
 <!-- ═══ SPENDING ANALYSIS ═══ -->
 <div class="tab-panel" id="tab-spending">
 <div class="stats">
     <div class="stat"><div class="value">{money(adjusted_total)}</div><div class="label">Total Spend ({len(months)} months)</div></div>
-    <div class="stat"><div class="value">{money(adjusted_avg)}</div><div class="label">Monthly Average</div></div>
+    <div class="stat"><div class="value">{money(adjusted_avg)}</div><div class="label">Monthly Avg ({len(months)}mo, adjusted)</div></div>
     <div class="stat"><div class="value" style="color:{trend_color}">{trend_arrow} {abs(data['mom_change']):.0f}%</div><div class="label">3-Mo Avg vs Prior 3-Mo</div></div>
 </div>
 
