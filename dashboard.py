@@ -33,6 +33,7 @@ from parsers import parse_csvs
 from income import (
     extract_passive_income,
     compute_empirical_growth_rate,
+    compute_net_worth_history,
     extract_transfers,
     extract_bank_interest,
     extract_corporate_income,
@@ -73,42 +74,42 @@ def generate_html(data: dict, ai_html: str | None = None,
     def money(val):
         return f"${val:,.2f}"
 
-    def sparkline(values: list[float], width: int = 80, height: int = 24) -> str:
-        """Generate an inline SVG sparkline from a list of values."""
-        if not values or max(values) == 0:
-            return ""
-        max_v = max(values)
-        min_v = min(values)
-        rng = max_v - min_v if max_v != min_v else 1
-        n = len(values)
-        points = []
-        for i, v in enumerate(values):
-            x = round(i / max(n - 1, 1) * (width - 4) + 2, 1)
-            y = round(height - 2 - ((v - min_v) / rng) * (height - 4), 1)
-            points.append(f"{x},{y}")
-        if n >= 2:
-            trend = values[-1] - values[0]
-            color = "#e15759" if trend > rng * 0.1 else "#27ae60" if trend < -rng * 0.1 else "#7f8c8d"
+    def delta_badge(val, pct):
+        """Green for decrease (good), red for increase (bad)."""
+        if val > 0:
+            color = "#e15759"
+            arrow = "\u2191"
+        elif val < 0:
+            color = "#27ae60"
+            arrow = "\u2193"
         else:
-            color = "#7f8c8d"
-        return (f'<svg width="{width}" height="{height}" style="vertical-align:middle">'
-                f'<polyline points="{" ".join(points)}" fill="none" stroke="{color}" '
-                f'stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>'
-                f'<circle cx="{points[-1].split(",")[0]}" cy="{points[-1].split(",")[1]}" '
-                f'r="2.5" fill="{color}"/></svg>')
+            return '<span style="color:var(--muted)">\u2014</span>'
+        return (f'<span style="color:{color};font-weight:600">{arrow} {money(abs(val))} '
+                f'({abs(pct):.0f}%)</span>')
 
-    def budget_bar(actual: float, target: float) -> str:
-        """Generate an inline budget progress bar."""
-        pct = min(actual / target * 100, 150) if target > 0 else 0
-        color = "#27ae60" if pct <= 90 else "#f39c12" if pct <= 105 else "#e15759"
-        bar_width = min(pct / 150 * 100, 100)
-        over = f" ({actual/target*100:.0f}%)" if pct > 0 else ""
-        return (f'<div style="display:flex;align-items:center;gap:6px">'
-                f'<div style="flex:1;background:#eee;border-radius:4px;height:8px;min-width:60px">'
-                f'<div style="width:{bar_width:.0f}%;background:{color};border-radius:4px;height:100%"></div>'
-                f'</div>'
-                f'<span style="font-size:0.78em;color:{color};white-space:nowrap">{money(target)}{over}</span>'
-                f'</div>')
+    def severity_badge(severity):
+        if severity == "alert":
+            return '<span style="background:#e15759;color:#fff;padding:2px 8px;border-radius:12px;font-size:0.8em;font-weight:600">Alert</span>'
+        return '<span style="background:#f39c12;color:#fff;padding:2px 8px;border-radius:12px;font-size:0.8em;font-weight:600">Warning</span>'
+
+    def type_label(atype):
+        labels = {"large_transaction": "Large Txn", "category_spike": "Category Spike", "new_merchant": "New Merchant"}
+        return labels.get(atype, atype)
+
+    def month_grouped_rows(txns, render_row, colspan=2):
+        by_month = {}
+        for t in txns:
+            m = str(t["date"])[:7]
+            by_month.setdefault(m, []).append(t)
+        rows = ""
+        for m in sorted(by_month, reverse=True):
+            month_txns = by_month[m]
+            label = datetime.strptime(m, "%Y-%m").strftime("%b %Y")
+            total = sum(t["amount"] for t in month_txns)
+            rows += f'<tr class="group-header"><td colspan="{colspan}">{label}</td><td style="text-align:right">{money(total)}</td></tr>'
+            for t in sorted(month_txns, key=lambda x: x["date"], reverse=True):
+                rows += f'<tr>{render_row(t)}</tr>'
+        return rows
 
     # ── Data preparation ──
     source_breakdown = data.get("source_breakdown", {})
@@ -211,30 +212,23 @@ def generate_html(data: dict, ai_html: str | None = None,
                 key = (row["date"], amt)
                 if row.get("note", "").strip():
                     etransfer_notes[key] = row["note"].strip()
-    etransfer_by_month = {}
-    for t in etransfer_txns:
-        m = str(t["date"])[:7]
-        etransfer_by_month.setdefault(m, []).append(t)
-    etransfer_rows = ""
-    for m in sorted(etransfer_by_month, reverse=True):
-        txns = etransfer_by_month[m]
-        month_label = datetime.strptime(m, "%Y-%m").strftime("%b %Y")
-        month_total = sum(t["amount"] for t in txns)
-        etransfer_rows += f'<tr class="group-header"><td colspan="2">{month_label}</td><td style="text-align:right">{money(month_total)}</td></tr>'
-        for t in txns:
-            date_str = str(t["date"])[:10]
-            amt_str = f'{t["amount"]:.2f}'
-            note = etransfer_notes.get((date_str, amt_str), "")
-            note_html = f'<span style="color:var(--muted);font-style:italic">{note}</span>' if note else ""
-            etransfer_rows += f'<tr><td>{date_str}</td><td>{note_html}</td><td style="text-align:right">{money(t["amount"])}</td></tr>'
+    def _etransfer_out_row(t):
+        date_str = str(t["date"])[:10]
+        amt_str = f'{t["amount"]:.2f}'
+        note = etransfer_notes.get((date_str, amt_str), "")
+        note_html = f'<span style="color:var(--muted);font-style:italic">{note}</span>' if note else ""
+        return f'<td>{date_str}</td><td>{note_html}</td><td style="text-align:right">{money(t["amount"])}</td>'
+    etransfer_rows = month_grouped_rows(etransfer_txns, _etransfer_out_row)
 
     # Category heatmap (last 6 months)
-    has_budgets = bool(budgets)
     heatmap_months = months[-6:]
-    heatmap_month_headers = "".join(
-        f"<th style='text-align:right'>{datetime.strptime(m, '%Y-%m').strftime('%b')}</th>"
-        for m in heatmap_months
-    )
+    heatmap_month_headers = ""
+    for i, m in enumerate(heatmap_months):
+        label = datetime.strptime(m, '%Y-%m').strftime('%b')
+        if i == len(heatmap_months) - 1:
+            heatmap_month_headers += f"<th style='text-align:right;border-bottom:3px solid var(--accent);font-weight:700'>{label}</th>"
+        else:
+            heatmap_month_headers += f"<th style='text-align:right'>{label}</th>"
     # Compute global max for single heatmap scale across all cells
     heatmap_global_max = 0
     for c, t, a, n in data["categories"]:
@@ -248,18 +242,32 @@ def generate_html(data: dict, ai_html: str | None = None,
         for t in data["monthly_txns"].get(m, []):
             heatmap_txns_by_cat[t["category"]].append(t)
 
+    # ── Anomalies grouped by category (for heatmap integration) ──
+    anomalies = data.get("anomalies", [])
+    anomalies_by_cat = defaultdict(list)
+    for a in anomalies:
+        anomalies_by_cat[a["category"]].append(a)
+
+    current_month = datetime.now().strftime("%Y-%m")
+
+    col_count = 9
+    last_col_idx = len(heatmap_months) - 1
+
     heatmap_row_data = []
     for c, t, a, n in data["categories"]:
         monthly_vals = [data["category_monthly"].get(c, {}).get(m, 0) for m in heatmap_months]
         cat_total = sum(monthly_vals)
         cat_avg = cat_total / len(monthly_vals) if monthly_vals else 0
         cells = ""
-        for val in monthly_vals:
+        for idx, val in enumerate(monthly_vals):
             intensity = (val / heatmap_global_max) if heatmap_global_max > 0 else 0
             bg = f"rgba(78, 121, 167, {intensity:.2f})"
             text_color = "#fff" if intensity > 0.5 else "var(--text)"
             cell_text = money(val) if val > 0 else '<span style="color:#ccc">\u2014</span>'
-            cells += f"<td style='text-align:right;background:{bg};color:{text_color}'>{cell_text}</td>"
+            if idx == last_col_idx:
+                cells += f"<td style='text-align:right;background:{bg};color:{text_color};border-left:2px solid rgba(78,121,167,0.3);border-right:2px solid rgba(78,121,167,0.3)'>{cell_text}</td>"
+            else:
+                cells += f"<td style='text-align:right;background:{bg};color:{text_color}'>{cell_text}</td>"
         avg_cell = f"<td style='text-align:right;font-weight:600'>{money(cat_avg)}</td>"
         total_cell = f"<td style='text-align:right;font-weight:600'>{money(cat_total)}</td>"
 
@@ -278,11 +286,34 @@ def generate_html(data: dict, ai_html: str | None = None,
         for tx in top_txns:
             txn_rows += f"<tr><td>{tx['merchant']}</td><td style='text-align:center'>{tx['date'].strftime('%b %d')}</td><td style='text-align:right'>{money(tx['amount'])}</td></tr>"
 
+        # Anomaly badges for this category
+        cat_anomalies = anomalies_by_cat.get(c, [])
+        alert_count = sum(1 for a in cat_anomalies if a["severity"] == "alert")
+        warn_count = len(cat_anomalies) - alert_count
+        anom_badge = ""
+        if alert_count:
+            anom_badge += f' <span style="background:#e15759;color:#fff;padding:1px 5px;border-radius:8px;font-size:0.7em">{alert_count}</span>'
+        if warn_count:
+            anom_badge += f' <span style="background:#f39c12;color:#fff;padding:1px 5px;border-radius:8px;font-size:0.7em">{warn_count}</span>'
+
+        # Anomaly detail rows for drill-down
+        anom_detail = ""
+        if cat_anomalies:
+            anom_detail_rows = ""
+            for a in cat_anomalies:
+                anom_detail_rows += f"<tr><td>{severity_badge(a['severity'])}</td><td>{type_label(a['type'])}</td><td>{a['description']}</td><td style='text-align:right'>{money(a['amount'])}</td></tr>"
+            anom_detail = (
+                f'<div style="margin-top:12px">'
+                f'<div style="font-weight:600;margin-bottom:6px;font-size:0.85em;color:#e15759">Anomalies</div>'
+                f'<table class="data-table"><thead><tr><th>Severity</th><th>Type</th><th>Description</th><th style="text-align:right">Amount</th></tr></thead>'
+                f'<tbody>{anom_detail_rows}</tbody></table></div>'
+            )
+
         detail_html = ""
         if cat_txns:
             detail_html = (
                 f'<tr class="cat-detail" style="display:none">'
-                f'<td colspan="9" style="padding:0">'
+                f'<td colspan="{col_count}" style="padding:0">'
                 f'<div style="padding:12px 20px;background:#f8f9fa;border-top:1px solid var(--border)">'
                 f'<div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">'
                 f'<div>'
@@ -295,11 +326,13 @@ def generate_html(data: dict, ai_html: str | None = None,
                 f'<table class="data-table"><thead><tr><th>Merchant</th><th style="text-align:center">Date</th><th style="text-align:right">Amount</th></tr></thead>'
                 f'<tbody>{txn_rows}</tbody></table>'
                 f'</div>'
-                f'</div></div></td></tr>'
+                f'</div>'
+                f'{anom_detail}'
+                f'</div></td></tr>'
             )
 
         cat_row = (
-            f'<tr class="cat-row"><td><span class="cat-arrow">\u25b8</span> {c}</td>'
+            f'<tr class="cat-row"><td><span class="cat-arrow">\u25b8</span> {c}{anom_badge}</td>'
             f'{cells}{avg_cell}{total_cell}</tr>'
             f'{detail_html}'
         )
@@ -307,201 +340,24 @@ def generate_html(data: dict, ai_html: str | None = None,
     heatmap_row_data.sort(key=lambda x: x[0], reverse=True)
     heatmap_rows = "".join(row for _, row in heatmap_row_data)
 
-    # ── Monthly Spotlight data prep ──
-    current_month = datetime.now().strftime("%Y-%m")
-    # Pick the most recent month with data (max statement date)
-    spotlight_html = ""
-    spot_month = months[-1] if months else None
-    if spot_month:
-        is_partial = spot_month == current_month
-        spot_label = datetime.strptime(spot_month, "%Y-%m").strftime("%B %Y")
-        if is_partial:
-            spot_label += " (in progress)"
-        spot_total = data["monthly_totals"].get(spot_month, 0)
+    # Heatmap totals row
+    hm_month_totals = [sum(data["category_monthly"].get(c, {}).get(m, 0) for c, _, _, _ in data["categories"]) for m in heatmap_months]
+    hm_grand_total = sum(hm_month_totals)
+    hm_grand_avg = hm_grand_total / len(heatmap_months) if heatmap_months else 0
+    hm_total_cells = "".join(f"<td style='text-align:right'>{money(v)}</td>" for v in hm_month_totals)
+    heatmap_tfoot = (
+        f'<tfoot><tr style="font-weight:700"><td>Total</td>{hm_total_cells}'
+        f'<td style="text-align:right">{money(hm_grand_avg)}</td>'
+        f'<td style="text-align:right">{money(hm_grand_total)}</td></tr></tfoot>'
+    )
 
-        # Delta vs prior month
-        spot_idx = months.index(spot_month) if spot_month in months else -1
-        prior_month = months[spot_idx - 1] if spot_idx > 0 else None
-        prior_total = data["monthly_totals"].get(prior_month, 0) if prior_month else 0
-        delta_prior = spot_total - prior_total if prior_month else 0
-        delta_prior_pct = (delta_prior / prior_total * 100) if prior_total > 0 else 0
-
-        # Delta vs 3-month average (use months before the spotlight month)
-        prev_months = months[:spot_idx] if spot_idx > 0 else []
-        avg_months = prev_months[-3:] if len(prev_months) >= 3 else prev_months
-        avg_3mo = sum(data["monthly_totals"].get(m, 0) for m in avg_months) / len(avg_months) if avg_months else 0
-        delta_avg = spot_total - avg_3mo if avg_3mo > 0 else 0
-        delta_avg_pct = (delta_avg / avg_3mo * 100) if avg_3mo > 0 else 0
-
-        def delta_badge(val, pct):
-            """Green for decrease (good), red for increase (bad)."""
-            if val > 0:
-                color = "#e15759"
-                arrow = "\u2191"
-            elif val < 0:
-                color = "#27ae60"
-                arrow = "\u2193"
-            else:
-                return '<span style="color:var(--muted)">\u2014</span>'
-            return (f'<span style="color:{color};font-weight:600">{arrow} {money(abs(val))} '
-                    f'({abs(pct):.0f}%)</span>')
-
-        # Top 5 categories for spotlight month
-        spot_cats = []
-        for c, _, _, _ in data["categories"]:
-            val = data["category_monthly"].get(c, {}).get(spot_month, 0)
-            prior_val = data["category_monthly"].get(c, {}).get(prior_month, 0) if prior_month else 0
-            if val > 0:
-                spot_cats.append((c, val, val - prior_val))
-        spot_cats.sort(key=lambda x: x[1], reverse=True)
-        spot_cats = spot_cats[:5]
-
-        def delta_inline(val):
-            """Compact delta for table cells — arrow + amount, no percentage."""
-            if val > 0:
-                return f'<span style="color:#e15759;font-size:0.85em">\u2191 {money(val)}</span>'
-            elif val < 0:
-                return f'<span style="color:#27ae60;font-size:0.85em">\u2193 {money(abs(val))}</span>'
-            return ""
-
-        top_cats_rows = ""
-        for cat_name, cat_val, cat_delta in spot_cats:
-            mom_cell = '<td style="text-align:right;color:var(--muted)">&mdash;</td>'
-            if prior_month and cat_delta != 0:
-                mom_cell = f'<td style="text-align:right">{delta_inline(cat_delta)}</td>'
-            budget_cell = ""
-            if has_budgets:
-                target = budgets.get(cat_name)
-                no_budget = '<span style="color:#ccc">\u2014</span>'
-                budget_cell = f"<td>{budget_bar(cat_val, target) if target else no_budget}</td>"
-            top_cats_rows += f"<tr><td>{cat_name}</td><td style='text-align:right'>{money(cat_val)}</td>{mom_cell}{budget_cell}</tr>"
-
-        # Top 5 biggest transactions for spotlight month
-        spot_txns = sorted(data["monthly_txns"].get(spot_month, []), key=lambda t: t["amount"], reverse=True)[:5]
-        top_txn_rows = ""
-        for t in spot_txns:
-            top_txn_rows += f"<tr><td>{t['merchant']}</td><td style='text-align:center'>{t['date'].strftime('%b %d')}</td><td style='text-align:right'>{money(t['amount'])}</td></tr>"
-
-        spotlight_html = f"""
-<section class="card">
-    <h2>Monthly Spotlight: {spot_label}</h2>
-    <p class="section-desc">Your most recent month at a glance — top categories and biggest transactions vs prior month.</p>
-    <div class="stats">
-        <div class="stat"><div class="value">{money(spot_total)}</div><div class="label">Total Spend</div></div>
-        <div class="stat"><div class="value">{delta_badge(delta_prior, delta_prior_pct)}</div><div class="label">vs Prior Month</div></div>
-        <div class="stat"><div class="value">{delta_badge(delta_avg, delta_avg_pct)}</div><div class="label">vs 3-Month Avg</div></div>
-    </div>
-    <div class="chart-row">
-        <div>
-            <h3 style="font-size:1em;margin-bottom:10px;color:var(--accent)">Top Categories</h3>
-            <table class="data-table">
-                <thead><tr><th>Category</th><th style="text-align:right">Amount</th><th style="text-align:right">MoM</th>{'<th>vs Budget</th>' if has_budgets else ''}</tr></thead>
-                <tbody>{top_cats_rows}</tbody>
-            </table>
-        </div>
-        <div>
-            <h3 style="font-size:1em;margin-bottom:10px;color:var(--accent)">Biggest Transactions</h3>
-            <table class="data-table">
-                <thead><tr><th>Merchant</th><th style="text-align:center">Date</th><th style="text-align:right">Amount</th></tr></thead>
-                <tbody>{top_txn_rows}</tbody>
-            </table>
-        </div>
-    </div>
-</section>"""
-
-    # ── Budget Tracker data prep ──
-    budget_tracker_html = ""
-    if budgets:
-        current_month = datetime.now().strftime("%Y-%m")
-        # Use completed months only (exclude current partial month) for 3-month rolling avg
-        completed_months = [m for m in months if m != current_month]
-        avg_months = completed_months[-3:] if len(completed_months) >= 3 else completed_months
-
-        bt_rows_data = []
-        on_track = 0
-        for category, target in budgets.items():
-            if not avg_months:
-                continue
-            cat_vals = [data["category_monthly"].get(category, {}).get(m, 0) for m in avg_months]
-            avg_3mo = sum(cat_vals) / len(cat_vals)
-            pct = avg_3mo / target * 100 if target > 0 else 0
-            overspend = pct - 100
-            if pct <= 105:
-                on_track += 1
-            # Sparkline over all months
-            all_vals = [data["category_monthly"].get(category, {}).get(m, 0) for m in months]
-            spark = sparkline(all_vals)
-            bar = budget_bar(avg_3mo, target)
-            bt_rows_data.append((overspend, category, avg_3mo, bar, spark))
-
-        # Sort by overspend severity (most over-budget first)
-        bt_rows_data.sort(key=lambda x: x[0], reverse=True)
-        bt_rows = ""
-        for _, cat, avg_val, bar, spark in bt_rows_data:
-            bt_rows += f"<tr><td>{cat}</td><td style='text-align:right'>{money(avg_val)}</td><td>{bar}</td><td>{spark}</td></tr>"
-
-        total_cats = len(bt_rows_data)
-        summary = f"{on_track} of {total_cats} categories on track"
-        avg_label = f"{len(avg_months)}-month avg" if avg_months else "avg"
-        budget_tracker_html = f"""
-<section id="budget-tracker" class="card">
-    <h2>Budget Tracker</h2>
-    <p class="section-desc">All budgeted categories vs target ({avg_label}, excludes current partial month). {summary}.</p>
-    <div class="table-scroll">
-    <table class="data-table">
-        <thead><tr><th>Category</th><th style="text-align:right">{avg_label.title()}</th><th>vs Budget</th><th>Trend</th></tr></thead>
-        <tbody>{bt_rows}</tbody>
-    </table>
-    </div>
-</section>"""
-
-    # ── Anomaly Detection section ──
-    anomaly_html = ""
-    anomalies = data.get("anomalies", [])
-    if anomalies:
-        def severity_badge(severity):
-            if severity == "alert":
-                return '<span style="background:#e15759;color:#fff;padding:2px 8px;border-radius:12px;font-size:0.8em;font-weight:600">Alert</span>'
-            return '<span style="background:#f39c12;color:#fff;padding:2px 8px;border-radius:12px;font-size:0.8em;font-weight:600">Warning</span>'
-
-        def type_label(atype):
-            labels = {"large_transaction": "Large Txn", "category_spike": "Category Spike", "new_merchant": "New Merchant"}
-            return labels.get(atype, atype)
-
-        anom_rows = ""
-        for a in anomalies:
-            date_str = str(a["date"])[:10] if a["date"] else "\u2014"
-            anom_rows += (
-                f"<tr>"
-                f"<td>{severity_badge(a['severity'])}</td>"
-                f"<td><span style='background:#eee;padding:2px 6px;border-radius:4px;font-size:0.8em'>{type_label(a['type'])}</span></td>"
-                f"<td>{a['description']}</td>"
-                f"<td style='text-align:right'>{money(a['amount'])}</td>"
-                f"<td style='text-align:center'>{date_str}</td>"
-                f"</tr>"
-            )
-        anomaly_html = f"""
-<section id="anomalies" class="card">
-    <h2>Spending Anomalies</h2>
-    <p class="section-desc">Statistical outliers detected in your spending — unusually large transactions, category spikes, and new high-spend merchants.</p>
-    <div class="table-scroll">
-    <table class="data-table">
-        <thead><tr><th>Severity</th><th>Type</th><th>Description</th><th style="text-align:right">Amount</th><th style="text-align:center">Date</th></tr></thead>
-        <tbody>{anom_rows}</tbody>
-    </table>
-    </div>
-</section>"""
+    # (Anomalies are now integrated into the Category Heatmap drill-down)
 
     # Trend indicator
     trend_arrow = "\u2191" if data["mom_change"] > 0 else "\u2193" if data["mom_change"] < 0 else "\u2192"
     trend_color = "#e74c3c" if data["mom_change"] > 5 else "#27ae60" if data["mom_change"] < -5 else "#f39c12"
 
-    # Fixed costs table rows
-    fixed_rows = ""
     num_months = len(months)
-    for merchant, total_amt, by_month in fixed_detail:
-        monthly_avg = total_amt / num_months
-        fixed_rows += f"<tr><td>{merchant}</td><td style='text-align:right'>{money(total_amt)}</td><td style='text-align:right'>{money(monthly_avg)}</td></tr>"
 
     # Fixed vs discretionary per-month data (last 6 months) for stacked bar chart
     fixed_disc_months = months[-6:]
@@ -516,6 +372,8 @@ def generate_html(data: dict, ai_html: str | None = None,
         disc_per_month.append(round(max(disc_m, 0), 2))
     fixed_per_month_json = json.dumps(fixed_per_month)
     disc_per_month_json = json.dumps(disc_per_month)
+    fixed_avg = sum(fixed_per_month) / len(fixed_per_month) if fixed_per_month else 0
+    disc_avg = sum(disc_per_month) / len(disc_per_month) if disc_per_month else 0
 
     # AI section
     ai_section = ""
@@ -1035,20 +893,168 @@ def generate_html(data: dict, ai_html: str | None = None,
         <div class="nw-legend">{nw_legend}</div>
     </div>"""
 
-    # ── Overview stats ──
-    overview_stats = f"""
-    <div class="stat"><div class="value">{money(adjusted_total)}</div><div class="label">Total Spend ({len(months)} months)</div></div>
-    <div class="stat"><div class="value">{money(adjusted_avg)}</div><div class="label">Monthly Average</div></div>
-    <div class="stat"><div class="value" style="color:{trend_color}">{trend_arrow} {abs(data['mom_change']):.0f}%</div><div class="label">3-Mo Avg vs Prior 3-Mo</div></div>"""
-    if debt_payoff_total > 0:
-        overview_stats += f"""
-    <div class="stat"><div class="value" style="color:#27ae60">{money(debt_payoff_total)}</div><div class="label">Debt Paid Off</div></div>"""
+    # ── Net Worth History chart ──
+    net_worth_history_card = ""
+    net_worth_history_chart_js = ""
+    nw_history = passive_income.get("net_worth_history") if passive_income else None
+    if nw_history and len(nw_history) >= 2:
+        nwh_labels = json.dumps([datetime.strptime(r["month"], "%Y-%m").strftime("%b %Y") for r in nw_history])
+        nwh_accessible = json.dumps([r["accessible"] for r in nw_history])
+        nwh_registered = json.dumps([r["registered"] for r in nw_history])
+        nwh_corporate = json.dumps([r["corporate"] for r in nw_history])
+        nwh_property = json.dumps([r["property"] for r in nw_history])
+        nwh_total = json.dumps([r["total"] for r in nw_history])
 
-    if cashback_total > 0:
-        overview_stats += f"""
-    <div class="stat"><div class="value" style="color:#27ae60">{money(cashback_total)}</div><div class="label">VISA Cash-Back ({len(months)} months)</div></div>"""
+        # Summary: total change over period
+        first_total = nw_history[0]["total"]
+        last_total = nw_history[-1]["total"]
+        nwh_change = last_total - first_total
+        nwh_change_pct = (nwh_change / first_total * 100) if first_total > 0 else 0
+        nwh_color = "#27ae60" if nwh_change >= 0 else "#e15759"
+        nwh_arrow = "+" if nwh_change >= 0 else ""
+        if abs(nwh_change) >= 1_000_000:
+            nwh_change_str = f"{nwh_arrow}${nwh_change/1_000_000:,.2f}M"
+        elif abs(nwh_change) >= 1_000:
+            nwh_change_str = f"{nwh_arrow}${nwh_change/1_000:,.0f}K"
+        else:
+            nwh_change_str = f"{nwh_arrow}{money(nwh_change)}"
 
-    # ── Total income stat (actual cash received) ──
+        net_worth_history_card = f"""
+    <div class="card">
+        <h2>Net Worth Over Time</h2>
+        <div style="display:flex;align-items:center;gap:18px;margin-bottom:10px;flex-wrap:wrap">
+            <span style="font-size:1.1em;font-weight:600;color:{nwh_color}">{nwh_change_str} ({nwh_arrow}{nwh_change_pct:.1f}%)</span>
+            <span class="metric-sub">{nw_history[0]['month']} to {nw_history[-1]['month']}</span>
+            <label style="margin-left:auto;font-size:0.85em;cursor:pointer;display:flex;align-items:center;gap:4px">
+                <input type="checkbox" id="nwhExclProperty" style="cursor:pointer"> Excl. Property
+            </label>
+        </div>
+        <div class="chart-container">
+            <canvas id="netWorthHistoryChart" height="120"></canvas>
+        </div>
+    </div>"""
+
+        net_worth_history_chart_js = f"""
+    var nwhChart = new Chart(document.getElementById('netWorthHistoryChart'), {{
+        type: 'line',
+        data: {{
+            labels: {nwh_labels},
+            datasets: [
+                {{
+                    label: 'Accessible',
+                    data: {nwh_accessible},
+                    borderColor: '#4e79a7',
+                    backgroundColor: 'rgba(78, 121, 167, 0.35)',
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 2,
+                    borderWidth: 2,
+                    order: 4
+                }},
+                {{
+                    label: 'Registered',
+                    data: {nwh_registered},
+                    borderColor: '#76b7b2',
+                    backgroundColor: 'rgba(118, 183, 178, 0.35)',
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 2,
+                    borderWidth: 2,
+                    order: 3
+                }},
+                {{
+                    label: 'Corporate',
+                    data: {nwh_corporate},
+                    borderColor: '#59a14f',
+                    backgroundColor: 'rgba(89, 161, 79, 0.35)',
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 2,
+                    borderWidth: 2,
+                    order: 2
+                }},
+                {{
+                    label: 'Property',
+                    data: {nwh_property},
+                    borderColor: '#f28e2b',
+                    backgroundColor: 'rgba(242, 142, 43, 0.35)',
+                    fill: true,
+                    tension: 0.3,
+                    pointRadius: 2,
+                    borderWidth: 2,
+                    order: 1
+                }},
+                {{
+                    label: 'Total',
+                    data: {nwh_total},
+                    borderColor: 'rgba(100, 100, 100, 0.7)',
+                    backgroundColor: 'transparent',
+                    fill: false,
+                    borderDash: [4, 3],
+                    tension: 0.3,
+                    pointRadius: 0,
+                    borderWidth: 2,
+                    order: 0,
+                    yAxisID: 'y1'
+                }}
+            ]
+        }},
+        options: {{
+            responsive: true,
+            interaction: {{ mode: 'index', intersect: false }},
+            plugins: {{
+                legend: {{ position: 'bottom' }},
+                tooltip: {{
+                    mode: 'index',
+                    intersect: false,
+                    callbacks: {{
+                        label: function(ctx) {{
+                            var v = ctx.parsed.y;
+                            var fmt = v >= 1000000 ? '$' + (v/1000000).toFixed(2) + 'M' : '$' + (v/1000).toFixed(0) + 'k';
+                            return ctx.dataset.label + ': ' + fmt;
+                        }}
+                    }}
+                }}
+            }},
+            scales: {{
+                x: {{ stacked: true }},
+                y: {{
+                    stacked: true,
+                    ticks: {{
+                        callback: function(v) {{
+                            return v >= 1000000 ? '$' + (v/1000000).toFixed(1) + 'M' : '$' + (v/1000).toFixed(0) + 'k';
+                        }}
+                    }}
+                }},
+                y1: {{
+                    display: false,
+                    stacked: false,
+                    min: 0
+                }}
+            }}
+        }}
+    }});
+    // Excl. Property checkbox
+    var nwhCb = document.getElementById('nwhExclProperty');
+    if (nwhCb) {{
+        nwhCb.addEventListener('change', function() {{
+            var hide = this.checked;
+            // Property is dataset index 3
+            nwhChart.data.datasets[3].hidden = hide;
+            // Recalculate Total line
+            var accessible = {nwh_accessible};
+            var registered = {nwh_registered};
+            var corporate = {nwh_corporate};
+            var property = {nwh_property};
+            var newTotal = accessible.map(function(v, i) {{
+                return v + registered[i] + corporate[i] + (hide ? 0 : property[i]);
+            }});
+            nwhChart.data.datasets[4].data = newTotal;
+            nwhChart.update();
+        }});
+    }}"""
+
+    # ── Total income stat (for Income tab) ──
     total_income_actual = 0.0
     if corporate_income:
         total_income_actual += corporate_income["total_income"]
@@ -1056,12 +1062,6 @@ def generate_html(data: dict, ai_html: str | None = None,
         total_income_actual += sum(t["amount"] for t in incoming_etransfers)
     if bank_interest:
         total_income_actual += sum(t["amount"] for t in bank_interest)
-    if total_income_actual > 0:
-        income_num_months = len(months) or 1
-        income_monthly_avg = total_income_actual / income_num_months
-        overview_stats += f"""
-    <div class="stat"><div class="value" style="color:#27ae60">{money(total_income_actual)}</div><div class="label">Total Income ({len(months)} months)</div></div>
-    <div class="stat"><div class="value" style="color:#27ae60">{money(income_monthly_avg)}</div><div class="label">Avg Monthly Income</div></div>"""
 
     # ── Milestones Timeline (unified) ──
     timeline_events = []  # list of (date, icon, title, detail, color)
@@ -1155,26 +1155,7 @@ def generate_html(data: dict, ai_html: str | None = None,
     </table>
 </section>"""
 
-    # ── Fixed vs Discretionary section ──
-    fixed_section = ""
-    if fixed_detail:
-        fixed_section = f"""
-<section id="fixed-discretionary" class="card">
-    <h2>Fixed vs Discretionary</h2>
-    <p class="section-desc">{fixed_pct}% of total spending is fixed (pre-authorized recurring debits)</p>
-    <div class="chart-row">
-        <div>
-            <table class="data-table">
-                <thead><tr><th>Fixed Cost</th><th style="text-align:right">Total</th><th style="text-align:right">Monthly Avg</th></tr></thead>
-                <tbody>{fixed_rows}</tbody>
-                <tfoot><tr style="font-weight:700"><td>Total Fixed</td><td style="text-align:right">{money(fixed_total)}</td><td style="text-align:right">{money(fixed_total / num_months if num_months else 0)}</td></tr></tfoot>
-            </table>
-        </div>
-        <div>
-            <div class="chart-container"><canvas id="fixedDiscChart"></canvas></div>
-        </div>
-    </div>
-</section>"""
+    # (Fixed vs Discretionary is now integrated into the Subscription Audit card)
 
     # ── Corporate Income section ──
     corporate_section = ""
@@ -1201,26 +1182,12 @@ def generate_html(data: dict, ai_html: str | None = None,
                 decline_pct = round((1 - latest_rev / prior_rev) * 100)
                 corp_revenue_warning = f'<div style="color:#e74c3c;font-size:0.9em;margin-top:10px;font-weight:600">⚠ Revenue declining: down {decline_pct}% month-over-month</div>'
         corp_trailing_total_avg = round(corp_revenue_avg + corp_div_avg, 2)
-        corporate_section = f"""
-<section id="corporate-income" class="card">
-    <h2>Corporate Income</h2>
-    <p class="section-desc">Revenue from Tall Tree Technology (client payments) and dividends from Britton Holdings Growth (investment portfolio)</p>
-    {corp_revenue_warning}
-    <table class="data-table table-narrow">
-        <thead><tr><th>Month</th><th style="text-align:right">Revenue (Tall Tree)</th><th style="text-align:right">Dividends (BH Growth)</th><th style="text-align:right">Total</th></tr></thead>
-        <tbody>{corp_rows}</tbody>
-        <tfoot>
-            <tr style="font-weight:700"><td>Total</td><td style="text-align:right">{money(corporate_income['revenue_total'])}</td><td style="text-align:right">{money(corporate_income['dividends_total'])}</td><td style="text-align:right">{money(corporate_income['total_income'])}</td></tr>
-            <tr style="color:var(--muted)"><td>Trailing Avg (3-mo)</td><td style="text-align:right">{money(corp_revenue_avg)}</td><td style="text-align:right">{money(corp_div_avg)}</td><td style="text-align:right">{money(corp_trailing_total_avg)}</td></tr>
-        </tfoot>
-    </table>
-</section>"""
 
-    # ── Incoming e-Transfers section ──
+    # ── Incoming e-Transfers data prep ──
     incoming_etransfers = incoming_etransfers or []
-    etransfer_income_section = ""
+    etransfer_in_rows = ""
+    etransfer_in_total = 0
     if incoming_etransfers:
-        # Load annotations from etransfer-notes-in.csv (date,amount,note)
         etransfer_in_notes = {}
         in_notes_path = os.path.join(folder, "etransfer-notes-in.csv")
         if os.path.exists(in_notes_path):
@@ -1230,60 +1197,79 @@ def generate_html(data: dict, ai_html: str | None = None,
                     key = (row["date"], amt)
                     if row.get("note", "").strip():
                         etransfer_in_notes[key] = row["note"].strip()
-        # Group by month
-        etransfer_in_by_month = {}
-        for t in incoming_etransfers:
-            m = str(t["date"])[:7]
-            etransfer_in_by_month.setdefault(m, []).append(t)
-        etransfer_in_rows = ""
         etransfer_in_total = sum(t["amount"] for t in incoming_etransfers)
-        for m in sorted(etransfer_in_by_month, reverse=True):
-            txns = etransfer_in_by_month[m]
-            month_label = datetime.strptime(m, "%Y-%m").strftime("%b %Y")
-            month_total = sum(t["amount"] for t in txns)
-            etransfer_in_rows += f'<tr class="group-header"><td colspan="2">{month_label}</td><td style="text-align:right">{money(month_total)}</td></tr>'
-            for t in txns:
-                date_str = str(t["date"])[:10]
-                amt_str = f'{t["amount"]:.2f}'
-                note = etransfer_in_notes.get((date_str, amt_str), "")
-                note_html = f'<span style="color:var(--muted);font-style:italic">{note}</span>' if note else ""
-                etransfer_in_rows += f'<tr><td>{date_str}</td><td>{note_html}</td><td style="text-align:right">{money(t["amount"])}</td></tr>'
-        etransfer_income_section = f"""
-<section id="incoming-etransfers" class="card">
-    <h2>Incoming e-Transfers</h2>
-    <p class="section-desc">Interac e-Transfer reimbursements received &mdash; {len(incoming_etransfers)} transactions totalling {money(etransfer_in_total)}</p>
+        def _etransfer_in_row(t):
+            date_str = str(t["date"])[:10]
+            amt_str = f'{t["amount"]:.2f}'
+            note = etransfer_in_notes.get((date_str, amt_str), "")
+            note_html = f'<span style="color:var(--muted);font-style:italic">{note}</span>' if note else ""
+            return f'<td>{date_str}</td><td>{note_html}</td><td style="text-align:right">{money(t["amount"])}</td>'
+        etransfer_in_rows = month_grouped_rows(incoming_etransfers, _etransfer_in_row)
+
+    # ── Bank Interest data prep ──
+    bank_interest = bank_interest or []
+    bi_rows = ""
+    bi_total = 0
+    if bank_interest:
+        bi_total = sum(t["amount"] for t in bank_interest)
+        def _bi_row(t):
+            date_str = str(t["date"])[:10]
+            return f'<td>{date_str}</td><td>{t["account"]}</td><td style="text-align:right">{money(t["amount"])}</td>'
+        bi_rows = month_grouped_rows(bank_interest, _bi_row)
+
+    # ── Income tab top-level stats ──
+    income_tab_stats = ""
+    if corporate_income or incoming_etransfers or bank_interest:
+        income_num_months = len(months) or 1
+        income_monthly_avg = total_income_actual / income_num_months if total_income_actual > 0 else 0
+        income_tab_stats = f"""
+<div class="stats">
+    <div class="stat"><div class="value" style="color:#27ae60">{money(total_income_actual)}</div><div class="label">Total Income ({len(months)} months)</div></div>
+    <div class="stat"><div class="value" style="color:#27ae60">{money(income_monthly_avg)}</div><div class="label">Avg Monthly Income</div></div>"""
+        if cashback_total > 0:
+            income_tab_stats += f"""
+    <div class="stat"><div class="value" style="color:#27ae60">{money(cashback_total)}</div><div class="label">VISA Cash-Back ({len(months)} months)</div></div>"""
+        income_tab_stats += """
+</div>"""
+
+    # ── Income Detail section (unified) ──
+    income_detail_section = ""
+    if corporate_income or incoming_etransfers or bank_interest:
+        _id_parts = ""
+        if corporate_income:
+            _id_parts += f"""
+    <h3>Corporate Income</h3>
+    <p class="section-desc">Revenue from Tall Tree Technology + dividends from Britton Holdings Growth</p>
+    {corp_revenue_warning}
+    <table class="data-table table-narrow">
+        <thead><tr><th>Month</th><th style="text-align:right">Revenue (Tall Tree)</th><th style="text-align:right">Dividends (BH Growth)</th><th style="text-align:right">Total</th></tr></thead>
+        <tbody>{corp_rows}</tbody>
+        <tfoot>
+            <tr style="font-weight:700"><td>Total</td><td style="text-align:right">{money(corporate_income['revenue_total'])}</td><td style="text-align:right">{money(corporate_income['dividends_total'])}</td><td style="text-align:right">{money(corporate_income['total_income'])}</td></tr>
+            <tr style="color:var(--muted)"><td>Trailing Avg (3-mo)</td><td style="text-align:right">{money(corp_revenue_avg)}</td><td style="text-align:right">{money(corp_div_avg)}</td><td style="text-align:right">{money(corp_trailing_total_avg)}</td></tr>
+        </tfoot>
+    </table>"""
+        if incoming_etransfers:
+            _id_parts += f"""
+    <h3>Incoming e-Transfers</h3>
+    <p class="section-desc">{len(incoming_etransfers)} transactions totalling {money(etransfer_in_total)}</p>
     <table class="data-table table-narrow">
         <thead><tr><th>Date</th><th>Note</th><th style="text-align:right">Amount</th></tr></thead>
         <tbody>{etransfer_in_rows}</tbody>
-    </table>
-</section>"""
-
-    # ── Bank Interest section ──
-    bank_interest = bank_interest or []
-    bank_interest_section = ""
-    if bank_interest:
-        bi_by_month = {}
-        for t in bank_interest:
-            m = str(t["date"])[:7]
-            bi_by_month.setdefault(m, []).append(t)
-        bi_total = sum(t["amount"] for t in bank_interest)
-        bi_rows = ""
-        for m in sorted(bi_by_month, reverse=True):
-            txns = bi_by_month[m]
-            month_label = datetime.strptime(m, "%Y-%m").strftime("%b %Y")
-            month_total = sum(t["amount"] for t in txns)
-            bi_rows += f'<tr class="group-header"><td colspan="2">{month_label}</td><td style="text-align:right">{money(month_total)}</td></tr>'
-            for t in sorted(txns, key=lambda x: x["date"], reverse=True):
-                date_str = str(t["date"])[:10]
-                bi_rows += f'<tr><td>{date_str}</td><td>{t["account"]}</td><td style="text-align:right">{money(t["amount"])}</td></tr>'
-        bank_interest_section = f"""
-<section id="bank-interest" class="card">
-    <h2>Bank Interest</h2>
-    <p class="section-desc">Interest earned on cash and savings accounts &mdash; {len(bank_interest)} payments totalling {money(bi_total)}</p>
+    </table>"""
+        if bank_interest:
+            _id_parts += f"""
+    <h3>Bank Interest</h3>
+    <p class="section-desc">{len(bank_interest)} payments totalling {money(bi_total)}</p>
     <table class="data-table table-narrow">
         <thead><tr><th>Date</th><th>Account</th><th style="text-align:right">Amount</th></tr></thead>
         <tbody>{bi_rows}</tbody>
-    </table>
+    </table>"""
+        income_detail_section = f"""
+<section id="income-detail" class="card">
+    <h2>Income Detail</h2>
+    <p class="section-desc">Monthly breakdown of all income sources</p>
+    {_id_parts}
 </section>"""
 
     # ── Passive Income section ──
@@ -1423,9 +1409,6 @@ def generate_html(data: dict, ai_html: str | None = None,
     </table>
     {reg_html}
 </section>"""
-
-    # ── Income chart section (removed — not useful) ──
-    income_chart_section = ""
 
     # ── Tab buttons for conditional tabs ──
     income_tab_btn = ''
@@ -1596,22 +1579,21 @@ canvas {{ max-width: 100%; }}
 <div id="overview"></div>
 {hero_card}
 {net_worth_card}
-<div class="stats">
-    {overview_stats}
-</div>
+{net_worth_history_card}
 {savings_rate_section}
 
 </div>
 
 <!-- ═══ INCOME ═══ -->
-{'<div class="tab-panel" id="tab-income">' + income_chart_section + corporate_section + passive_section + etransfer_income_section + bank_interest_section + '</div>' if (corporate_income or passive_income or incoming_etransfers or bank_interest) else ''}
+{'<div class="tab-panel" id="tab-income">' + income_tab_stats + passive_section + income_detail_section + '</div>' if (corporate_income or passive_income or incoming_etransfers or bank_interest) else ''}
 
 <!-- ═══ SPENDING ANALYSIS ═══ -->
 <div class="tab-panel" id="tab-spending">
-
-{spotlight_html}
-
-{budget_tracker_html}
+<div class="stats">
+    <div class="stat"><div class="value">{money(adjusted_total)}</div><div class="label">Total Spend ({len(months)} months)</div></div>
+    <div class="stat"><div class="value">{money(adjusted_avg)}</div><div class="label">Monthly Average</div></div>
+    <div class="stat"><div class="value" style="color:{trend_color}">{trend_arrow} {abs(data['mom_change']):.0f}%</div><div class="label">3-Mo Avg vs Prior 3-Mo</div></div>
+</div>
 
 <section id="categories" class="card">
     <h2>Category Heatmap</h2>
@@ -1620,17 +1602,20 @@ canvas {{ max-width: 100%; }}
     <table class="data-table">
         <thead><tr><th>Category</th>{heatmap_month_headers}<th style="text-align:right">Avg</th><th style="text-align:right">6m Total</th></tr></thead>
         <tbody>{heatmap_rows}</tbody>
+        {heatmap_tfoot}
     </table>
     </div>
 </section>
 
-{anomaly_html}
-
-{fixed_section}
-
 <section id="subscriptions" class="card">
     <h2>Subscription Audit</h2>
-    <p class="section-desc">Recurring charges detected across your statements, grouped by status.</p>
+    <p class="section-desc">Recurring charges detected across your statements, grouped by status. {fixed_pct}% of total spending is fixed.</p>
+    <div class="stats">
+        <div class="stat"><div class="value">{fixed_pct}%</div><div class="label">Fixed Costs</div></div>
+        <div class="stat"><div class="value">{money(fixed_avg)}</div><div class="label">Fixed / Month</div></div>
+        <div class="stat"><div class="value">{money(disc_avg)}</div><div class="label">Discretionary / Month</div></div>
+    </div>
+    <div class="chart-container" style="max-height:200px"><canvas id="fixedDiscChart"></canvas></div>
     <div class="table-scroll">
     <table class="data-table">
         <thead><tr><th>Service</th><th style="text-align:right">Avg/Mo</th>{sub_month_headers}</tr></thead>
@@ -1733,6 +1718,8 @@ document.addEventListener('DOMContentLoaded', function() {{
 
     {savings_rate_chart_js}
 
+    {net_worth_history_chart_js}
+
 }});
 </script>
 
@@ -1815,6 +1802,13 @@ def main():
                 print(f"  {pa['account']:40s}  {pa['monthly_return']*100:+.3f}%/mo  {ann*100:+.1f}%/yr  avg ${pa['avg_balance']:>12,.0f}  ({pa['data_points']} pts)")
         else:
             print("Empirical growth: insufficient data (< 3 data points), using CSV rates")
+
+        nw_history = compute_net_worth_history(passive_income)
+        if nw_history:
+            passive_income["net_worth_history"] = nw_history
+            print(f"Net worth history: {len(nw_history)} months ({nw_history[0]['month']} to {nw_history[-1]['month']})")
+        else:
+            print("Net worth history: insufficient data (< 2 months)")
 
     # Extract corporate income from corporate accounts
     corporate_income = extract_corporate_income(folder)
