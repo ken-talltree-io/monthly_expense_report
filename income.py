@@ -324,6 +324,101 @@ def compute_empirical_growth_rate(passive_income: dict) -> dict | None:
     }
 
 
+def compute_net_worth_history(passive_income: dict) -> list[dict] | None:
+    """Build month-by-month net worth time series from account balance histories.
+
+    Collects balance_history from all 4 account categories, forward-fills gaps
+    (e.g. quarterly statements), backfills months before an account's first data
+    point with its first known balance, and includes constant-value accounts
+    (no history) at their current value for all months.
+
+    Returns list of {"month", "accessible", "registered", "corporate", "property", "total"}
+    sorted chronologically, or None if < 2 months of data.
+    """
+    if not passive_income:
+        return None
+
+    CATEGORY_MAP = {
+        "accounts": "accessible",
+        "registered_accounts": "registered",
+        "corporate_accounts": "corporate",
+        "property_accounts": "property",
+    }
+
+    # Collect per-account time series and constant-value accounts
+    account_series = []  # [(category, {month: balance})]
+    constant_accounts = []  # [(category, value)]
+
+    for key, category in CATEGORY_MAP.items():
+        for acct in passive_income.get(key, []):
+            history = acct.get("balance_history", [])
+            if history:
+                monthly = {}
+                for entry in history:
+                    date_str = entry["date"][:10]
+                    try:
+                        month = datetime.strptime(date_str, "%Y-%m-%d").strftime("%Y-%m")
+                    except (ValueError, TypeError):
+                        continue
+                    monthly[month] = entry["balance"]
+                if monthly:
+                    account_series.append((category, monthly))
+            else:
+                # No history — use current value as constant
+                val = acct.get("value", 0)
+                if val > 0:
+                    constant_accounts.append((category, val))
+
+    # Determine all months from accounts with history
+    all_months_set = set()
+    for _, monthly in account_series:
+        all_months_set.update(monthly.keys())
+
+    if len(all_months_set) < 2:
+        return None
+
+    all_months = sorted(all_months_set)
+
+    # Build per-category monthly totals
+    category_totals = {cat: defaultdict(float) for cat in CATEGORY_MAP.values()}
+
+    for category, monthly in account_series:
+        # Forward-fill and backfill
+        sorted_months_for_acct = sorted(monthly.keys())
+        first_known = monthly[sorted_months_for_acct[0]]
+        last_known = first_known
+
+        for month in all_months:
+            if month in monthly:
+                last_known = monthly[month]
+                category_totals[category][month] += last_known
+            elif month < sorted_months_for_acct[0]:
+                # Backfill: before first data point
+                category_totals[category][month] += first_known
+            else:
+                # Forward-fill: carry last known balance
+                category_totals[category][month] += last_known
+
+    # Add constant accounts to every month
+    for category, val in constant_accounts:
+        for month in all_months:
+            category_totals[category][month] += val
+
+    # Assemble result
+    result = []
+    for month in all_months:
+        row = {"month": month}
+        total = 0.0
+        for category in CATEGORY_MAP.values():
+            val = round(category_totals[category][month], 2)
+            row[category] = val
+            total += val
+        row["total"] = round(total, 2)
+        result.append(row)
+
+    return result
+
+
 def extract_transfers(folder: str) -> tuple[dict, list]:
     """Extract monthly transfer summary from debit card CSVs.
 

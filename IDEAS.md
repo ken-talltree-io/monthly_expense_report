@@ -22,7 +22,7 @@ Brainstormed during early development sessions. Items are checked off as they're
 - [ ] **"What-if" scenarios** — Interactive sliders for spending/yield changes showing impact on runway and time-to-sustainability.
 - [ ] **Year-over-year comparisons** — Same month last year vs this year to account for seasonality (holiday spending, annual insurance, etc.).
 - [ ] **Anomaly detection** — Baked-in visual alerts for transactions or category totals that are statistical outliers.
-- [ ] **Net worth over time** — Track net worth snapshots across dashboard runs and chart the trajectory.
+- [x] **Net worth over time** — Track net worth snapshots across dashboard runs and chart the trajectory.
 - [ ] **Recurring transaction detection** — Auto-flag new recurring charges that aren't in the subscription list (merchant appearing 3+ months in a row).
 - [ ] **Subscription price increase alerts** — Compare current subscription costs to previous periods and flag increases.
 - [ ] **Cash flow calendar** — When big bills hit each month relative to income deposits.
@@ -30,3 +30,4 @@ Brainstormed during early development sessions. Items are checked off as they're
 - [ ] **PDF/email export** — Auto-generate a monthly summary email or PDF snapshot for archival.
 - [ ] **Multi-period dashboard** — Compare any two time ranges side-by-side.
 - [ ] **Dark mode** — Alternate CSS palette + toggle (CSS variables already in place).
+- [ ] **Cross-reference anomalies vs savings rate** — Visual link between anomaly alerts and their impact on the savings rate chart.

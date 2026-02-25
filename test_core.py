@@ -25,6 +25,7 @@ from config import (
     ANOMALY_NEW_MERCHANT_MIN,
 )
 from analysis import analyze, detect_anomalies, get_ai_recommendations
+from income import compute_net_worth_history
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -882,3 +883,183 @@ class TestAIRecommendations:
             incoming_etransfers=etransfers, bank_interest=bank_interest,
             notes=notes)
         assert result is not None
+
+
+# ── Net worth history computation ─────────────────────────────────────────
+
+
+def _make_passive(accounts=None, registered=None, corporate=None, property_=None):
+    """Build a minimal passive_income dict for net worth history tests."""
+    return {
+        "accounts": accounts or [],
+        "registered_accounts": registered or [],
+        "corporate_accounts": corporate or [],
+        "property_accounts": property_ or [],
+        "accessible_balance": sum(a.get("value", 0) for a in (accounts or [])),
+        "registered_balance": sum(a.get("value", 0) for a in (registered or [])),
+        "corporate_balance": sum(a.get("value", 0) for a in (corporate or [])),
+        "property_balance": sum(a.get("value", 0) for a in (property_ or [])),
+    }
+
+
+def _acct(name, value, history=None):
+    """Build a minimal account dict with optional balance_history."""
+    return {"account": name, "value": value, "balance_history": history or []}
+
+
+def _hist(date_str, balance):
+    """Build a balance_history entry (deposits/withdrawals not needed here)."""
+    return {"date": date_str, "balance": balance, "deposits": 0, "withdrawals": 0}
+
+
+class TestNetWorthHistory:
+    """Verifies month-by-month net worth time series computation."""
+
+    def test_returns_none_when_no_balance_history(self):
+        """Accounts with no balance_history produce None."""
+        pi = _make_passive(accounts=[_acct("TFSA", 50000)])
+        assert compute_net_worth_history(pi) is None
+
+    def test_returns_none_with_only_one_month(self):
+        """A single month of data is insufficient."""
+        pi = _make_passive(accounts=[
+            _acct("TFSA", 50000, [_hist("2025-01-31", 50000)])
+        ])
+        assert compute_net_worth_history(pi) is None
+
+    def test_basic_two_month_history(self):
+        """Two months of data should produce a 2-entry time series."""
+        pi = _make_passive(accounts=[
+            _acct("TFSA", 52000, [
+                _hist("2025-01-31", 50000),
+                _hist("2025-02-28", 52000),
+            ])
+        ])
+        result = compute_net_worth_history(pi)
+        assert result is not None
+        assert len(result) == 2
+        assert result[0]["month"] == "2025-01"
+        assert result[0]["accessible"] == 50000.0
+        assert result[1]["accessible"] == 52000.0
+        assert result[1]["total"] == 52000.0
+
+    def test_forward_fill_with_multiple_accounts(self):
+        """When another account provides monthly data, gaps are forward-filled."""
+        pi = _make_passive(accounts=[
+            _acct("Monthly", 55000, [
+                _hist("2025-01-31", 50000),
+                _hist("2025-02-28", 52000),
+                _hist("2025-03-31", 55000),
+            ]),
+            _acct("Quarterly", 110000, [
+                _hist("2025-01-31", 100000),
+                _hist("2025-03-31", 110000),
+            ]),
+        ])
+        result = compute_net_worth_history(pi)
+        feb = next(r for r in result if r["month"] == "2025-02")
+        # Quarterly has no Feb data -> forward-filled from Jan (100000)
+        assert feb["accessible"] == 52000 + 100000
+
+    def test_property_constant_uses_current_value(self):
+        """Accounts without balance_history use their current value for all months."""
+        pi = _make_passive(
+            accounts=[
+                _acct("TFSA", 52000, [
+                    _hist("2025-01-31", 50000),
+                    _hist("2025-02-28", 52000),
+                ])
+            ],
+            property_=[_acct("House", 1900000)],
+        )
+        result = compute_net_worth_history(pi)
+        assert result[0]["property"] == 1900000.0
+        assert result[1]["property"] == 1900000.0
+        assert result[0]["total"] == 50000 + 1900000
+        assert result[1]["total"] == 52000 + 1900000
+
+    def test_multiple_categories_aggregate(self):
+        """Each category aggregates independently per month."""
+        pi = _make_passive(
+            accounts=[_acct("TFSA", 50000, [
+                _hist("2025-01-31", 48000),
+                _hist("2025-02-28", 50000),
+            ])],
+            registered=[_acct("RRSP", 100000, [
+                _hist("2025-01-31", 95000),
+                _hist("2025-02-28", 100000),
+            ])],
+            corporate=[_acct("Corp", 30000, [
+                _hist("2025-01-31", 28000),
+                _hist("2025-02-28", 30000),
+            ])],
+        )
+        result = compute_net_worth_history(pi)
+        jan = result[0]
+        assert jan["accessible"] == 48000
+        assert jan["registered"] == 95000
+        assert jan["corporate"] == 28000
+        assert jan["total"] == 48000 + 95000 + 28000
+
+    def test_multiple_accounts_same_category_sum(self):
+        """Multiple accounts within one category sum their balances."""
+        pi = _make_passive(accounts=[
+            _acct("TFSA", 30000, [
+                _hist("2025-01-31", 25000),
+                _hist("2025-02-28", 30000),
+            ]),
+            _acct("Cash", 10000, [
+                _hist("2025-01-31", 8000),
+                _hist("2025-02-28", 10000),
+            ]),
+        ])
+        result = compute_net_worth_history(pi)
+        assert result[0]["accessible"] == 33000  # 25000 + 8000
+        assert result[1]["accessible"] == 40000  # 30000 + 10000
+
+    def test_staggered_start_dates_backfilled(self):
+        """An account starting later gets backfilled with its first known balance."""
+        pi = _make_passive(accounts=[
+            _acct("Early", 60000, [
+                _hist("2025-01-31", 50000),
+                _hist("2025-02-28", 55000),
+                _hist("2025-03-31", 60000),
+            ]),
+            _acct("Late", 20000, [
+                _hist("2025-03-31", 20000),
+            ]),
+        ])
+        result = compute_net_worth_history(pi)
+        jan = next(r for r in result if r["month"] == "2025-01")
+        # Late account backfilled with first known (20000)
+        assert jan["accessible"] == 50000 + 20000
+
+    def test_empty_passive_income_returns_none(self):
+        """Empty dict returns None."""
+        assert compute_net_worth_history({}) is None
+
+    def test_months_sorted_chronologically(self):
+        """Output months are in ascending order."""
+        pi = _make_passive(accounts=[
+            _acct("TFSA", 50000, [
+                _hist("2025-03-31", 50000),
+                _hist("2025-01-31", 45000),
+                _hist("2025-02-28", 48000),
+            ])
+        ])
+        result = compute_net_worth_history(pi)
+        months = [r["month"] for r in result]
+        assert months == sorted(months)
+
+    def test_values_rounded_to_two_decimals(self):
+        """All monetary values are rounded to 2 decimal places."""
+        pi = _make_passive(accounts=[
+            _acct("TFSA", 33333.336, [
+                _hist("2025-01-31", 33333.333),
+                _hist("2025-02-28", 33333.336),
+            ])
+        ])
+        result = compute_net_worth_history(pi)
+        for row in result:
+            for key in ("accessible", "registered", "corporate", "property", "total"):
+                assert row[key] == round(row[key], 2)
