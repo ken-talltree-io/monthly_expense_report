@@ -434,23 +434,32 @@ def compute_net_worth_history(passive_income: dict, passthrough: list | None = N
         for month in all_months:
             category_totals[category][month] += val
 
-    # Subtract passthrough principals from accessible category
+    # Subtract passthrough principals from accessible category.
+    # Balance_history uses point-in-time end-of-month snapshots with forward/backfill,
+    # so we: (a) only subtract when the money is present at month-end (before the
+    # departure date), and (b) cap the subtraction so accessible never drops below
+    # its pre-passthrough level (the balance data may not fully reflect the deposit
+    # due to forward-fill gaps).
     for pt in (passthrough or []):
+        # Find the pre-passthrough floor: highest accessible in months ending
+        # before the passthrough start date
+        floor = 0.0
         for month in all_months:
             year, mon = int(month[:4]), int(month[5:7])
-            month_start = date(year, mon, 1)
-            days_in_month = calendar.monthrange(year, mon)[1]
-            month_end = date(year, mon, days_in_month)
+            month_end = date(year, mon, calendar.monthrange(year, mon)[1])
+            if month_end < pt["start_date"]:
+                floor = max(floor, category_totals["accessible"][month])
 
-            # Overlap between [month_start, month_end] and [pt start, pt end]
-            overlap_start = max(month_start, pt["start_date"])
-            overlap_end = min(month_end, pt["end_date"])
-            if overlap_start > overlap_end:
-                continue
+        for month in all_months:
+            year, mon = int(month[:4]), int(month[5:7])
+            month_end = date(year, mon, calendar.monthrange(year, mon)[1])
 
-            days_active = (overlap_end - overlap_start).days + 1
-            fraction = days_active / days_in_month
-            category_totals["accessible"][month] -= pt["principal"] * fraction
+            # Only subtract when money is present at month-end:
+            # deposited on/before month_end AND hasn't left yet (end_date > month_end)
+            if pt["start_date"] <= month_end < pt["end_date"]:
+                max_sub = max(0, category_totals["accessible"][month] - floor)
+                actual_sub = min(pt["principal"], max_sub)
+                category_totals["accessible"][month] -= actual_sub
 
     # Assemble result
     result = []

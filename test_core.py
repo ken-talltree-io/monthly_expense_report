@@ -1234,12 +1234,13 @@ class TestPassthroughTransfers:
 class TestPassthroughNetWorth:
     """Verifies net worth adjustment for passthrough accounts."""
 
-    def test_full_month_subtracted(self):
-        """Passthrough principal fully subtracted for months entirely within period."""
+    def test_subtraction_capped_at_excess_over_floor(self):
+        """Subtraction is capped so accessible never drops below pre-passthrough floor."""
         pi = _make_passive(accounts=[
-            _acct("Chequing", 700000, [
-                _hist("2025-08-31", 700000),
-                _hist("2025-09-30", 700000),
+            _acct("Chequing", 720000, [
+                _hist("2025-06-30", 100000),   # pre-passthrough floor
+                _hist("2025-08-31", 720000),   # includes $619.5K deposit
+                _hist("2025-09-30", 720000),
             ])
         ])
         pt = [{
@@ -1250,17 +1251,41 @@ class TestPassthroughNetWorth:
             "description": "Sarah inheritance",
         }]
         result = compute_net_worth_history(pi, passthrough=pt)
-        assert result is not None
-        # Both months are fully within the passthrough period
-        for row in result:
-            assert row["accessible"] == round(700000 - 619500, 2)
+        aug = next(r for r in result if r["month"] == "2025-08")
+        sep = next(r for r in result if r["month"] == "2025-09")
+        # Excess over floor: 720000 - 100000 = 620000 > principal 619500
+        # So full principal subtracted
+        assert aug["accessible"] == round(720000 - 619500, 2)
+        assert sep["accessible"] == round(720000 - 619500, 2)
 
-    def test_partial_month_prorated(self):
-        """Passthrough principal pro-rated for partial months."""
+    def test_departure_month_not_subtracted(self):
+        """Month where passthrough ends is not adjusted (balance already reflects departure)."""
+        pi = _make_passive(accounts=[
+            _acct("Chequing", 200000, [
+                _hist("2025-06-30", 100000),
+                _hist("2025-12-31", 720000),
+                _hist("2026-01-31", 200000),  # after $629K EFTOUT
+            ])
+        ])
+        pt = [{
+            "account_suffix": "WK4ZQ2P35CAD",
+            "start_date": date(2025, 7, 10),
+            "end_date": date(2026, 1, 22),
+            "principal": 619500.00,
+            "description": "Sarah inheritance",
+        }]
+        result = compute_net_worth_history(pi, passthrough=pt)
+        jan = next(r for r in result if r["month"] == "2026-01")
+        # January: end_date (Jan 22) <= month_end (Jan 31), so no subtraction
+        assert jan["accessible"] == 200000.0
+
+    def test_forward_filled_month_not_over_subtracted(self):
+        """When balance is forward-filled (doesn't include deposit), subtraction is minimal."""
         pi = _make_passive(accounts=[
             _acct("Chequing", 700000, [
-                _hist("2025-07-31", 700000),  # Jul: passthrough starts Jul 10 = 22/31
-                _hist("2025-08-31", 700000),  # Aug: full month
+                _hist("2025-06-30", 100000),   # pre-passthrough
+                _hist("2025-07-31", 100000),   # forward-filled, same as June
+                _hist("2025-08-31", 700000),   # actual balance with deposit
             ])
         ])
         pt = [{
@@ -1272,12 +1297,8 @@ class TestPassthroughNetWorth:
         }]
         result = compute_net_worth_history(pi, passthrough=pt)
         jul = next(r for r in result if r["month"] == "2025-07")
-        aug = next(r for r in result if r["month"] == "2025-08")
-        # July: 22 days active out of 31
-        expected_jul = round(700000 - 619500 * (22 / 31), 2)
-        assert jul["accessible"] == expected_jul
-        # August: full month
-        assert aug["accessible"] == round(700000 - 619500, 2)
+        # July balance == floor, so no subtraction (excess = 0)
+        assert jul["accessible"] == 100000.0
 
     def test_no_passthrough_unchanged(self):
         """Without passthrough, net worth is unmodified."""
