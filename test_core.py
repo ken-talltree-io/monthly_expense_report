@@ -25,7 +25,7 @@ from config import (
     ANOMALY_NEW_MERCHANT_MIN,
 )
 from analysis import analyze, detect_anomalies, get_ai_recommendations
-from income import compute_net_worth_history, load_passthrough, extract_bank_interest, extract_transfers
+from income import compute_net_worth_history, load_passthrough, load_liabilities, extract_bank_interest, extract_transfers
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -1330,3 +1330,180 @@ class TestPassthroughNetWorth:
         result = compute_net_worth_history(pi, passthrough=pt)
         for row in result:
             assert row["accessible"] == 200000.0
+
+
+# ── Liability Tests ─────────────────────────────────────────────────────────
+
+
+class TestLoadLiabilities:
+    """Verifies liabilities.csv loading."""
+
+    def test_load_from_csv(self, tmp_path):
+        """Reads liabilities.csv and returns structured records."""
+        csv_file = tmp_path / "liabilities.csv"
+        csv_file.write_text(
+            "description,start_date,end_date,amount\n"
+            "KIA auto loan,2023-01-01,2025-06-27,39993.32\n"
+        )
+        result = load_liabilities(str(tmp_path))
+        assert len(result) == 1
+        assert result[0]["description"] == "KIA auto loan"
+        assert result[0]["start_date"] == date(2023, 1, 1)
+        assert result[0]["end_date"] == date(2025, 6, 27)
+        assert result[0]["amount"] == 39993.32
+
+    def test_missing_file_returns_empty(self, tmp_path):
+        """No liabilities.csv means no liabilities."""
+        assert load_liabilities(str(tmp_path)) == []
+
+    def test_multiple_records(self, tmp_path):
+        """Multiple rows produce multiple records."""
+        csv_file = tmp_path / "liabilities.csv"
+        csv_file.write_text(
+            "description,start_date,end_date,amount\n"
+            "KIA auto loan,2023-01-01,2025-06-27,39993.32\n"
+            "First National mortgage,2010-06-14,2025-07-29,296942.47\n"
+        )
+        result = load_liabilities(str(tmp_path))
+        assert len(result) == 2
+        assert result[0]["amount"] == 39993.32
+        assert result[1]["amount"] == 296942.47
+
+
+class TestLiabilitiesNetWorth:
+    """Verifies net worth adjustment for liabilities."""
+
+    def test_active_liability_subtracted_from_total(self):
+        """Active liabilities reduce the total but not individual categories."""
+        pi = _make_passive(accounts=[
+            _acct("TFSA", 500000, [
+                _hist("2025-01-31", 500000),
+                _hist("2025-02-28", 500000),
+            ])
+        ])
+        liabilities = [{
+            "description": "Mortgage",
+            "start_date": date(2020, 1, 1),
+            "end_date": date(2025, 7, 29),
+            "amount": 296942.47,
+        }]
+        result = compute_net_worth_history(pi, liabilities=liabilities)
+        jan = result[0]
+        # Category value unaffected
+        assert jan["accessible"] == 500000.0
+        # Liabilities shown as negative
+        assert jan["liabilities"] == -296942.47
+        # Total reflects subtraction
+        assert jan["total"] == round(500000 - 296942.47, 2)
+
+    def test_liability_disappears_after_end_date(self):
+        """Once end_date passes, the liability no longer reduces the total."""
+        pi = _make_passive(accounts=[
+            _acct("TFSA", 500000, [
+                _hist("2025-06-30", 500000),
+                _hist("2025-07-31", 500000),
+                _hist("2025-08-31", 500000),
+            ])
+        ])
+        liabilities = [{
+            "description": "KIA auto loan",
+            "start_date": date(2023, 1, 1),
+            "end_date": date(2025, 6, 27),
+            "amount": 39993.32,
+        }]
+        result = compute_net_worth_history(pi, liabilities=liabilities)
+        jun = next(r for r in result if r["month"] == "2025-06")
+        jul = next(r for r in result if r["month"] == "2025-07")
+        # June: end_date is Jun 27, month_end is Jun 30 → 30 >= 27 → NOT active
+        assert jun["liabilities"] == 0.0
+        assert jun["total"] == 500000.0
+        # July: also not active
+        assert jul["liabilities"] == 0.0
+        assert jul["total"] == 500000.0
+
+    def test_liability_active_before_end_date_month(self):
+        """Liability is active for months ending before end_date."""
+        pi = _make_passive(accounts=[
+            _acct("TFSA", 500000, [
+                _hist("2025-05-31", 500000),
+                _hist("2025-06-30", 500000),
+            ])
+        ])
+        liabilities = [{
+            "description": "Mortgage",
+            "start_date": date(2020, 1, 1),
+            "end_date": date(2025, 7, 29),
+            "amount": 296942.47,
+        }]
+        result = compute_net_worth_history(pi, liabilities=liabilities)
+        may = next(r for r in result if r["month"] == "2025-05")
+        jun = next(r for r in result if r["month"] == "2025-06")
+        # May 31 < Jul 29 → active
+        assert may["liabilities"] == -296942.47
+        assert may["total"] == round(500000 - 296942.47, 2)
+        # Jun 30 < Jul 29 → active
+        assert jun["liabilities"] == -296942.47
+
+    def test_multiple_liabilities_sum(self):
+        """Multiple active liabilities are summed."""
+        pi = _make_passive(accounts=[
+            _acct("TFSA", 500000, [
+                _hist("2025-05-31", 500000),
+                _hist("2025-06-30", 500000),
+            ])
+        ])
+        liabilities = [
+            {
+                "description": "KIA auto loan",
+                "start_date": date(2023, 1, 1),
+                "end_date": date(2025, 6, 27),
+                "amount": 39993.32,
+            },
+            {
+                "description": "Mortgage",
+                "start_date": date(2020, 1, 1),
+                "end_date": date(2025, 7, 29),
+                "amount": 296942.47,
+            },
+        ]
+        result = compute_net_worth_history(pi, liabilities=liabilities)
+        may = next(r for r in result if r["month"] == "2025-05")
+        jun = next(r for r in result if r["month"] == "2025-06")
+        # May: both active (May 31 < Jun 27 and May 31 < Jul 29)
+        assert may["liabilities"] == round(-(39993.32 + 296942.47), 2)
+        assert may["total"] == round(500000 - 39993.32 - 296942.47, 2)
+        # June: only mortgage active (Jun 30 >= Jun 27, but Jun 30 < Jul 29)
+        assert jun["liabilities"] == -296942.47
+        assert jun["total"] == round(500000 - 296942.47, 2)
+
+    def test_no_liabilities_has_zero_field(self):
+        """Without liabilities, the liabilities field is 0."""
+        pi = _make_passive(accounts=[
+            _acct("TFSA", 50000, [
+                _hist("2025-01-31", 50000),
+                _hist("2025-02-28", 50000),
+            ])
+        ])
+        result = compute_net_worth_history(pi)
+        for row in result:
+            assert row["liabilities"] == 0.0
+            assert row["total"] == 50000.0
+
+    def test_liability_before_start_date_not_subtracted(self):
+        """Months before the liability's start_date are unaffected."""
+        pi = _make_passive(accounts=[
+            _acct("TFSA", 500000, [
+                _hist("2022-11-30", 500000),
+                _hist("2022-12-31", 500000),
+            ])
+        ])
+        liabilities = [{
+            "description": "KIA auto loan",
+            "start_date": date(2023, 1, 1),
+            "end_date": date(2025, 6, 27),
+            "amount": 39993.32,
+        }]
+        result = compute_net_worth_history(pi, liabilities=liabilities)
+        for row in result:
+            assert row["liabilities"] == 0.0
+            assert row["total"] == 500000.0

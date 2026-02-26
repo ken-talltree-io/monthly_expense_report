@@ -36,6 +36,24 @@ def load_passthrough(folder: str) -> list[dict]:
     return records
 
 
+def load_liabilities(folder: str) -> list[dict]:
+    """Load liabilities.csv → list of {"description", "start_date", "end_date", "amount"}."""
+    path = os.path.join(folder, "liabilities.csv")
+    if not os.path.exists(path):
+        return []
+
+    records = []
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            records.append({
+                "description": row["description"].strip(),
+                "start_date": datetime.strptime(row["start_date"].strip(), "%Y-%m-%d").date(),
+                "end_date": datetime.strptime(row["end_date"].strip(), "%Y-%m-%d").date(),
+                "amount": float(row["amount"].strip()),
+            })
+    return records
+
+
 # ── Income & Transfer Extraction ─────────────────────────────────────────────
 
 def extract_passive_income(folder: str, source: str = "csv") -> dict | None:
@@ -350,7 +368,8 @@ def compute_empirical_growth_rate(passive_income: dict) -> dict | None:
     }
 
 
-def compute_net_worth_history(passive_income: dict, passthrough: list | None = None) -> list[dict] | None:
+def compute_net_worth_history(passive_income: dict, passthrough: list | None = None,
+                               liabilities: list | None = None) -> list[dict] | None:
     """Build month-by-month net worth time series from account balance histories.
 
     Collects balance_history from all 4 account categories, forward-fills gaps
@@ -362,8 +381,12 @@ def compute_net_worth_history(passive_income: dict, passthrough: list | None = N
     "accessible" category for months where the passthrough was active, pro-rated
     for partial months.
 
-    Returns list of {"month", "accessible", "registered", "corporate", "property", "total"}
-    sorted chronologically, or None if < 2 months of data.
+    When liabilities are provided, active liabilities are subtracted from the
+    monthly total (not from any specific category). A liability is active when
+    start_date <= month_end and month_end < end_date.
+
+    Returns list of {"month", "accessible", "registered", "corporate", "property",
+    "liabilities", "total"} sorted chronologically, or None if < 2 months of data.
     """
     if not passive_income:
         return None
@@ -465,12 +488,22 @@ def compute_net_worth_history(passive_income: dict, passthrough: list | None = N
     result = []
     for month in all_months:
         row = {"month": month}
-        total = 0.0
+        asset_total = 0.0
         for category in CATEGORY_MAP.values():
             val = round(category_totals[category][month], 2)
             row[category] = val
-            total += val
-        row["total"] = round(total, 2)
+            asset_total += val
+
+        # Subtract active liabilities from total
+        year, mon = int(month[:4]), int(month[5:7])
+        month_end = date(year, mon, calendar.monthrange(year, mon)[1])
+        liability_total = 0.0
+        for liab in (liabilities or []):
+            if liab["start_date"] <= month_end < liab["end_date"]:
+                liability_total += liab["amount"]
+
+        row["liabilities"] = round(-liability_total, 2)
+        row["total"] = round(asset_total - liability_total, 2)
         result.append(row)
 
     return result

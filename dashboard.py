@@ -38,6 +38,7 @@ from income import (
     extract_bank_interest,
     extract_corporate_income,
     load_passthrough,
+    load_liabilities,
 )
 from analysis import analyze, get_ai_recommendations
 
@@ -923,6 +924,7 @@ def generate_html(data: dict, ai_html: str | None = None,
         nwh_registered = json.dumps([r["registered"] for r in nw_history])
         nwh_corporate = json.dumps([r["corporate"] for r in nw_history])
         nwh_property = json.dumps([r["property"] for r in nw_history])
+        nwh_liabilities = json.dumps([r.get("liabilities", 0) for r in nw_history])
         nwh_total = json.dumps([r["total"] for r in nw_history])
 
         # Summary: total change over period
@@ -1005,6 +1007,18 @@ def generate_html(data: dict, ai_html: str | None = None,
                     order: 1
                 }},
                 {{
+                    label: 'Liabilities',
+                    data: {nwh_liabilities},
+                    borderColor: '#e15759',
+                    backgroundColor: 'transparent',
+                    fill: false,
+                    borderDash: [6, 3],
+                    tension: 0.3,
+                    pointRadius: 0,
+                    borderWidth: 2,
+                    yAxisID: 'y1'
+                }},
+                {{
                     label: 'Total',
                     data: {nwh_total},
                     borderColor: 'rgba(100, 100, 100, 0.7)',
@@ -1048,8 +1062,7 @@ def generate_html(data: dict, ai_html: str | None = None,
                 }},
                 y1: {{
                     display: false,
-                    stacked: false,
-                    min: 0
+                    stacked: false
                 }}
             }}
         }}
@@ -1061,15 +1074,16 @@ def generate_html(data: dict, ai_html: str | None = None,
             var hide = this.checked;
             // Property is dataset index 3
             nwhChart.data.datasets[3].hidden = hide;
-            // Recalculate Total line
+            // Recalculate Total line (assets + liabilities)
             var accessible = {nwh_accessible};
             var registered = {nwh_registered};
             var corporate = {nwh_corporate};
             var property = {nwh_property};
+            var liabilities = {nwh_liabilities};
             var newTotal = accessible.map(function(v, i) {{
-                return v + registered[i] + corporate[i] + (hide ? 0 : property[i]);
+                return v + registered[i] + corporate[i] + (hide ? 0 : property[i]) + liabilities[i];
             }});
-            nwhChart.data.datasets[4].data = newTotal;
+            nwhChart.data.datasets[5].data = newTotal;
             nwhChart.update();
         }});
     }}"""
@@ -1809,6 +1823,10 @@ def main():
     passthrough = load_passthrough(folder)
     if passthrough:
         print(f"Loaded {len(passthrough)} passthrough record(s): {', '.join(pt['description'] for pt in passthrough)}")
+    liabilities = load_liabilities(folder)
+    if liabilities:
+        total_liab = sum(l["amount"] for l in liabilities)
+        print(f"Loaded {len(liabilities)} liability record(s): {', '.join(l['description'] for l in liabilities)} (${total_liab:,.2f} total)")
 
     transactions, debt_payoffs = parse_csvs(folder)
     print(f"Loaded {len(transactions)} transactions")
@@ -1864,7 +1882,7 @@ def main():
         else:
             print("Empirical growth: insufficient data (< 3 data points), using CSV rates")
 
-        nw_history = compute_net_worth_history(passive_income, passthrough=passthrough)
+        nw_history = compute_net_worth_history(passive_income, passthrough=passthrough, liabilities=liabilities)
         if nw_history:
             passive_income["net_worth_history"] = nw_history
             print(f"Net worth history: {len(nw_history)} months ({nw_history[0]['month']} to {nw_history[-1]['month']})")
