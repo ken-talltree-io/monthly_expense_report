@@ -25,7 +25,7 @@ from config import (
     ANOMALY_NEW_MERCHANT_MIN,
 )
 from analysis import analyze, detect_anomalies, get_ai_recommendations
-from income import compute_net_worth_history
+from income import compute_net_worth_history, load_passthrough, extract_bank_interest, extract_transfers
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -1063,3 +1063,249 @@ class TestNetWorthHistory:
         for row in result:
             for key in ("accessible", "registered", "corporate", "property", "total"):
                 assert row[key] == round(row[key], 2)
+
+
+# ── Passthrough Tests ────────────────────────────────────────────────────────
+
+
+class TestLoadPassthrough:
+    """Verifies passthrough.csv loading."""
+
+    def test_load_from_csv(self, tmp_path):
+        """Reads passthrough.csv and returns structured records."""
+        csv_file = tmp_path / "passthrough.csv"
+        csv_file.write_text(
+            "account_suffix,start_date,end_date,principal,description\n"
+            "WK4ZQ2P35CAD,2025-07-10,2026-01-22,619500.00,Sarah inheritance\n"
+        )
+        result = load_passthrough(str(tmp_path))
+        assert len(result) == 1
+        assert result[0]["account_suffix"] == "WK4ZQ2P35CAD"
+        assert result[0]["start_date"] == date(2025, 7, 10)
+        assert result[0]["end_date"] == date(2026, 1, 22)
+        assert result[0]["principal"] == 619500.00
+        assert result[0]["description"] == "Sarah inheritance"
+
+    def test_missing_file_returns_empty(self, tmp_path):
+        """No passthrough.csv means no passthrough records."""
+        assert load_passthrough(str(tmp_path)) == []
+
+    def test_multiple_records(self, tmp_path):
+        """Multiple rows produce multiple records."""
+        csv_file = tmp_path / "passthrough.csv"
+        csv_file.write_text(
+            "account_suffix,start_date,end_date,principal,description\n"
+            "ACCT1,2025-01-01,2025-06-30,10000.00,First\n"
+            "ACCT2,2025-03-01,2025-09-30,20000.00,Second\n"
+        )
+        result = load_passthrough(str(tmp_path))
+        assert len(result) == 2
+
+
+class TestPassthroughBankInterest:
+    """Verifies interest adjustment for passthrough accounts."""
+
+    def _make_csvs(self, tmp_path, rows):
+        """Create a minimal debit CSV with given rows in a Wealthsimple-style path."""
+        txn_dir = tmp_path / "transactions" / "personal" / "Wealthsimple Chequing"
+        txn_dir.mkdir(parents=True)
+        for fname, csv_rows in rows.items():
+            fpath = txn_dir / fname
+            fpath.write_text(
+                "date,transaction,description,amount,balance,currency\n"
+                + "\n".join(csv_rows) + "\n"
+            )
+
+    def test_interest_reduced_during_passthrough(self, tmp_path):
+        """INT during passthrough period is reduced by sarah_pct."""
+        self._make_csvs(tmp_path, {
+            "Chequing-WK4ZQ2P35CAD-2025-09-01.csv": [
+                # INT on Sep 1 covers August — passthrough active (started Jul 10)
+                # balance_before = 700000 - 1000 = 699000
+                # sarah_pct = min(1.0, 619500 / 699000) = 0.8862
+                # adjustment = 1000 * 0.8862 = 886.2 → adjusted = 113.8
+                "2025-09-01,INT,Interest earned,1000.00,700000.00,CAD",
+            ],
+        })
+        pt = [{
+            "account_suffix": "WK4ZQ2P35CAD",
+            "start_date": date(2025, 7, 10),
+            "end_date": date(2026, 1, 22),
+            "principal": 619500.00,
+            "description": "Sarah inheritance",
+        }]
+        txns, adj = extract_bank_interest(str(tmp_path), passthrough=pt)
+        assert len(txns) == 1
+        assert txns[0]["amount"] < 1000.00  # reduced
+        expected_adj = round(1000 * min(1.0, 619500 / 699000), 2)
+        assert adj["Sarah inheritance"] == expected_adj
+        assert txns[0]["amount"] == round(1000 - expected_adj, 2)
+
+    def test_interest_before_passthrough_not_adjusted(self, tmp_path):
+        """INT covering a month before passthrough start is untouched."""
+        self._make_csvs(tmp_path, {
+            "Chequing-WK4ZQ2P35CAD-2025-07-01.csv": [
+                # INT on Jul 1 covers June — passthrough starts Jul 10
+                "2025-07-01,INT,Interest earned,125.00,37500.00,CAD",
+            ],
+        })
+        pt = [{
+            "account_suffix": "WK4ZQ2P35CAD",
+            "start_date": date(2025, 7, 10),
+            "end_date": date(2026, 1, 22),
+            "principal": 619500.00,
+            "description": "Sarah inheritance",
+        }]
+        txns, adj = extract_bank_interest(str(tmp_path), passthrough=pt)
+        assert len(txns) == 1
+        assert txns[0]["amount"] == 125.00
+        assert adj == {}
+
+    def test_full_deduction_when_principal_exceeds_balance(self, tmp_path):
+        """When principal >= balance_before, all interest is deducted."""
+        self._make_csvs(tmp_path, {
+            "Chequing-WK4ZQ2P35CAD-2025-11-01.csv": [
+                # balance_before = 300000 - 500 = 299500
+                # sarah_pct = min(1.0, 619500 / 299500) = 1.0
+                "2025-11-01,INT,Interest earned,500.00,300000.00,CAD",
+            ],
+        })
+        pt = [{
+            "account_suffix": "WK4ZQ2P35CAD",
+            "start_date": date(2025, 7, 10),
+            "end_date": date(2026, 1, 22),
+            "principal": 619500.00,
+            "description": "Sarah inheritance",
+        }]
+        txns, adj = extract_bank_interest(str(tmp_path), passthrough=pt)
+        # All interest deducted, so no transaction emitted
+        assert len(txns) == 0
+        assert adj["Sarah inheritance"] == 500.00
+
+    def test_no_passthrough_returns_original(self, tmp_path):
+        """Without passthrough, function returns all interest unchanged."""
+        self._make_csvs(tmp_path, {
+            "Chequing-WK4ZQ2P35CAD-2025-09-01.csv": [
+                "2025-09-01,INT,Interest earned,1000.00,700000.00,CAD",
+            ],
+        })
+        txns, adj = extract_bank_interest(str(tmp_path))
+        assert len(txns) == 1
+        assert txns[0]["amount"] == 1000.00
+        assert adj == {}
+
+
+class TestPassthroughTransfers:
+    """Verifies EFTOUT exclusion for passthrough accounts."""
+
+    def test_eftout_matching_passthrough_excluded(self, tmp_path):
+        """EFTOUT with matching description is skipped."""
+        txn_dir = tmp_path / "transactions" / "personal" / "Wealthsimple Chequing"
+        txn_dir.mkdir(parents=True)
+        (txn_dir / "chequing.csv").write_text(
+            "date,transaction,description,amount,balance,currency\n"
+            "2026-01-22,EFTOUT,Withdrawal: Sarah inheritance,-629025.64,97095.22,CAD\n"
+            "2026-01-05,E_TRFOUT,Regular transfer,-500.00,200000.00,CAD\n"
+        )
+        pt = [{
+            "account_suffix": "WK4ZQ2P35CAD",
+            "start_date": date(2025, 7, 10),
+            "end_date": date(2026, 1, 22),
+            "principal": 619500.00,
+            "description": "Sarah inheritance",
+        }]
+        agg, _ = extract_transfers(str(tmp_path), passthrough=pt)
+        # The $629K EFTOUT should be excluded, only the $500 E_TRFOUT remains
+        jan = agg.get("2026-01", {})
+        assert jan.get("out", 0) == 500.00
+
+    def test_eftout_without_passthrough_included(self, tmp_path):
+        """Without passthrough, all EFTOUTs are counted."""
+        txn_dir = tmp_path / "transactions" / "personal" / "Wealthsimple Chequing"
+        txn_dir.mkdir(parents=True)
+        (txn_dir / "chequing.csv").write_text(
+            "date,transaction,description,amount,balance,currency\n"
+            "2026-01-22,EFTOUT,Withdrawal: Sarah inheritance,-629025.64,97095.22,CAD\n"
+        )
+        agg, _ = extract_transfers(str(tmp_path))
+        assert agg["2026-01"]["out"] == 629025.64
+
+
+class TestPassthroughNetWorth:
+    """Verifies net worth adjustment for passthrough accounts."""
+
+    def test_full_month_subtracted(self):
+        """Passthrough principal fully subtracted for months entirely within period."""
+        pi = _make_passive(accounts=[
+            _acct("Chequing", 700000, [
+                _hist("2025-08-31", 700000),
+                _hist("2025-09-30", 700000),
+            ])
+        ])
+        pt = [{
+            "account_suffix": "WK4ZQ2P35CAD",
+            "start_date": date(2025, 7, 10),
+            "end_date": date(2026, 1, 22),
+            "principal": 619500.00,
+            "description": "Sarah inheritance",
+        }]
+        result = compute_net_worth_history(pi, passthrough=pt)
+        assert result is not None
+        # Both months are fully within the passthrough period
+        for row in result:
+            assert row["accessible"] == round(700000 - 619500, 2)
+
+    def test_partial_month_prorated(self):
+        """Passthrough principal pro-rated for partial months."""
+        pi = _make_passive(accounts=[
+            _acct("Chequing", 700000, [
+                _hist("2025-07-31", 700000),  # Jul: passthrough starts Jul 10 = 22/31
+                _hist("2025-08-31", 700000),  # Aug: full month
+            ])
+        ])
+        pt = [{
+            "account_suffix": "WK4ZQ2P35CAD",
+            "start_date": date(2025, 7, 10),
+            "end_date": date(2026, 1, 22),
+            "principal": 619500.00,
+            "description": "Sarah inheritance",
+        }]
+        result = compute_net_worth_history(pi, passthrough=pt)
+        jul = next(r for r in result if r["month"] == "2025-07")
+        aug = next(r for r in result if r["month"] == "2025-08")
+        # July: 22 days active out of 31
+        expected_jul = round(700000 - 619500 * (22 / 31), 2)
+        assert jul["accessible"] == expected_jul
+        # August: full month
+        assert aug["accessible"] == round(700000 - 619500, 2)
+
+    def test_no_passthrough_unchanged(self):
+        """Without passthrough, net worth is unmodified."""
+        pi = _make_passive(accounts=[
+            _acct("Chequing", 700000, [
+                _hist("2025-08-31", 700000),
+                _hist("2025-09-30", 700000),
+            ])
+        ])
+        result = compute_net_worth_history(pi)
+        for row in result:
+            assert row["accessible"] == 700000.0
+
+    def test_month_outside_passthrough_unaffected(self):
+        """Months outside the passthrough period are not adjusted."""
+        pi = _make_passive(accounts=[
+            _acct("Chequing", 200000, [
+                _hist("2025-05-31", 200000),  # before passthrough
+                _hist("2025-06-30", 200000),  # before passthrough
+            ])
+        ])
+        pt = [{
+            "account_suffix": "WK4ZQ2P35CAD",
+            "start_date": date(2025, 7, 10),
+            "end_date": date(2026, 1, 22),
+            "principal": 619500.00,
+            "description": "Sarah inheritance",
+        }]
+        result = compute_net_worth_history(pi, passthrough=pt)
+        for row in result:
+            assert row["accessible"] == 200000.0

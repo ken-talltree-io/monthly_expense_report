@@ -37,6 +37,7 @@ from income import (
     extract_transfers,
     extract_bank_interest,
     extract_corporate_income,
+    load_passthrough,
 )
 from analysis import analyze, get_ai_recommendations
 
@@ -49,6 +50,7 @@ def generate_html(data: dict, ai_html: str | None = None,
                    corporate_income: dict | None = None,
                    incoming_etransfers: list | None = None,
                    bank_interest: list | None = None,
+                   passthrough_adj: dict | None = None,
                    folder: str = ".") -> str:
     notes = notes or {}
     budgets = budgets or {}
@@ -1314,6 +1316,7 @@ def generate_html(data: dict, ai_html: str | None = None,
         <div style="font-size:1.3em;font-weight:700;color:#27ae60">{money(other_income_monthly)}<span style="font-size:0.55em;font-weight:400;color:var(--muted)">/mo avg</span></div>
     </div>
     <p class="section-desc">e-Transfer reimbursements and bank interest &mdash; {other_count} transactions totalling {money(other_total)}</p>
+    {''.join(f'<p style="font-size:0.85em;color:var(--muted);margin:0.3em 0"><em>Adjusted for {money(adj)} pass-through ({desc}): &minus;{money(adj)} in interest excluded</em></p>' for desc, adj in (passthrough_adj or {}).items())}
     <table class="data-table table-narrow">
         <thead><tr><th>Date</th><th>Source</th><th>Detail</th><th style="text-align:right">Amount</th></tr></thead>
         <tbody>{other_rows}</tbody>
@@ -1800,9 +1803,12 @@ def main():
     # Load user category overrides from categories.csv
     config._user_categories = load_user_categories(folder)
 
-    # Load notes and budgets
+    # Load notes, budgets, and passthrough records
     user_notes = load_notes(folder)
     user_budgets = load_budgets(folder)
+    passthrough = load_passthrough(folder)
+    if passthrough:
+        print(f"Loaded {len(passthrough)} passthrough record(s): {', '.join(pt['description'] for pt in passthrough)}")
 
     transactions, debt_payoffs = parse_csvs(folder)
     print(f"Loaded {len(transactions)} transactions")
@@ -1829,17 +1835,20 @@ def main():
                 print(f"Applied {count} e-transfer category overrides")
 
     # Extract transfer data from debit card CSVs
-    transfers, incoming_etransfers = extract_transfers(folder)
+    transfers, incoming_etransfers = extract_transfers(folder, passthrough=passthrough)
     if transfers:
         print(f"Found transfer data across {len(transfers)} months")
     if incoming_etransfers:
         print(f"Found {len(incoming_etransfers)} incoming e-transfers")
 
     # Extract bank interest from personal + corporate debit CSVs
-    bank_interest = extract_bank_interest(folder)
+    bank_interest, passthrough_adj = extract_bank_interest(folder, passthrough=passthrough)
     if bank_interest:
         bi_total = sum(t["amount"] for t in bank_interest)
         print(f"Found {len(bank_interest)} bank interest payments totalling ${bi_total:,.2f}")
+    if passthrough_adj:
+        for desc, adj in passthrough_adj.items():
+            print(f"Passthrough adjustment ({desc}): −${adj:,.2f} in interest excluded")
 
     # Extract passive income from investment portfolio
     passive_income = extract_passive_income(folder, source=args.source)
@@ -1855,7 +1864,7 @@ def main():
         else:
             print("Empirical growth: insufficient data (< 3 data points), using CSV rates")
 
-        nw_history = compute_net_worth_history(passive_income)
+        nw_history = compute_net_worth_history(passive_income, passthrough=passthrough)
         if nw_history:
             passive_income["net_worth_history"] = nw_history
             print(f"Net worth history: {len(nw_history)} months ({nw_history[0]['month']} to {nw_history[-1]['month']})")
@@ -1898,6 +1907,7 @@ def main():
                          corporate_income=corporate_income,
                          incoming_etransfers=incoming_etransfers,
                          bank_interest=bank_interest,
+                         passthrough_adj=passthrough_adj,
                          folder=folder)
     output_path = os.path.join(folder, "dashboard.html")
     with open(output_path, "w", encoding="utf-8") as f:

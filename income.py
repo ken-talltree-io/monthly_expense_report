@@ -1,13 +1,39 @@
 """Income extraction: passive income, corporate income, transfers, and bank interest."""
 
+import calendar
 import csv
 import glob
 import os
 import re
 from collections import defaultdict
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 from parsers import parse_statement_balances
+
+
+# ── Passthrough Loading ──────────────────────────────────────────────────────
+
+def load_passthrough(folder: str) -> list[dict]:
+    """Load passthrough records from passthrough.csv.
+
+    Returns list of {"account_suffix": str, "start_date": date, "end_date": date,
+                      "principal": float, "description": str}.
+    """
+    path = os.path.join(folder, "passthrough.csv")
+    if not os.path.exists(path):
+        return []
+
+    records = []
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        for row in csv.DictReader(f):
+            records.append({
+                "account_suffix": row["account_suffix"].strip(),
+                "start_date": datetime.strptime(row["start_date"].strip(), "%Y-%m-%d").date(),
+                "end_date": datetime.strptime(row["end_date"].strip(), "%Y-%m-%d").date(),
+                "principal": float(row["principal"].strip()),
+                "description": row["description"].strip(),
+            })
+    return records
 
 
 # ── Income & Transfer Extraction ─────────────────────────────────────────────
@@ -324,13 +350,17 @@ def compute_empirical_growth_rate(passive_income: dict) -> dict | None:
     }
 
 
-def compute_net_worth_history(passive_income: dict) -> list[dict] | None:
+def compute_net_worth_history(passive_income: dict, passthrough: list | None = None) -> list[dict] | None:
     """Build month-by-month net worth time series from account balance histories.
 
     Collects balance_history from all 4 account categories, forward-fills gaps
     (e.g. quarterly statements), backfills months before an account's first data
     point with its first known balance, and includes constant-value accounts
     (no history) at their current value for all months.
+
+    When passthrough records are provided, their principal is subtracted from the
+    "accessible" category for months where the passthrough was active, pro-rated
+    for partial months.
 
     Returns list of {"month", "accessible", "registered", "corporate", "property", "total"}
     sorted chronologically, or None if < 2 months of data.
@@ -404,6 +434,24 @@ def compute_net_worth_history(passive_income: dict) -> list[dict] | None:
         for month in all_months:
             category_totals[category][month] += val
 
+    # Subtract passthrough principals from accessible category
+    for pt in (passthrough or []):
+        for month in all_months:
+            year, mon = int(month[:4]), int(month[5:7])
+            month_start = date(year, mon, 1)
+            days_in_month = calendar.monthrange(year, mon)[1]
+            month_end = date(year, mon, days_in_month)
+
+            # Overlap between [month_start, month_end] and [pt start, pt end]
+            overlap_start = max(month_start, pt["start_date"])
+            overlap_end = min(month_end, pt["end_date"])
+            if overlap_start > overlap_end:
+                continue
+
+            days_active = (overlap_end - overlap_start).days + 1
+            fraction = days_active / days_in_month
+            category_totals["accessible"][month] -= pt["principal"] * fraction
+
     # Assemble result
     result = []
     for month in all_months:
@@ -419,14 +467,20 @@ def compute_net_worth_history(passive_income: dict) -> list[dict] | None:
     return result
 
 
-def extract_transfers(folder: str) -> tuple[dict, list]:
+def extract_transfers(folder: str, passthrough: list | None = None) -> tuple[dict, list]:
     """Extract monthly transfer summary from debit card CSVs.
 
     Returns (aggregates, incoming_etransfers) where:
     - aggregates: dict of month -> {"in": float, "out": float}
     - incoming_etransfers: list of {"date": date, "amount": float} for E_TRFIN
     Covers TRFOUT, TRFIN, TRFINTF, E_TRFOUT, E_TRFIN, EFTOUT.
+
+    If passthrough is provided, EFTOUT transactions whose description matches
+    a passthrough description (substring) are excluded.
     """
+    passthrough = passthrough or []
+    pt_descriptions = [pt["description"] for pt in passthrough]
+
     TRANSFER_TYPES = {"TRFOUT", "TRFIN", "TRFINTF", "E_TRFOUT", "E_TRFIN", "EFTOUT"}
     transfers = defaultdict(lambda: {"in": 0.0, "out": 0.0})
     incoming_etransfers = []
@@ -449,14 +503,21 @@ def extract_transfers(folder: str) -> tuple[dict, list]:
                 txn_type = row["transaction"]
                 if txn_type not in TRANSFER_TYPES:
                     continue
+
+                # Skip EFTOUT transactions matching passthrough descriptions
+                if txn_type == "EFTOUT" and pt_descriptions:
+                    desc = row.get("description", "")
+                    if any(ptd in desc for ptd in pt_descriptions):
+                        continue
+
                 amount = float(row["amount"])
-                date = datetime.strptime(row["date"], "%Y-%m-%d")
-                month = date.strftime("%Y-%m")
+                dt = datetime.strptime(row["date"], "%Y-%m-%d")
+                month = dt.strftime("%Y-%m")
 
                 if amount > 0:
                     transfers[month]["in"] += amount
                     if txn_type == "E_TRFIN":
-                        incoming_etransfers.append({"date": date.date(), "amount": amount})
+                        incoming_etransfers.append({"date": dt.date(), "amount": amount})
                 else:
                     transfers[month]["out"] += abs(amount)
 
@@ -466,18 +527,41 @@ def extract_transfers(folder: str) -> tuple[dict, list]:
     return aggregates, incoming_etransfers
 
 
-def extract_bank_interest(folder: str) -> list:
+def extract_bank_interest(folder: str, passthrough: list | None = None) -> tuple[list, dict]:
     """Extract INT (interest) transactions from personal and corporate debit CSVs.
 
-    Returns list of {"date": date, "amount": float, "account": str} sorted newest-first.
+    Returns (interest_txns, passthrough_adj) where:
+    - interest_txns: list of {"date": date, "amount": float, "account": str} sorted newest-first
+    - passthrough_adj: dict of {description: total_amount_deducted} for each active passthrough
+
+    When passthrough records are provided, interest from matching accounts during
+    the passthrough period is reduced proportionally:
+        sarah_pct = min(1.0, principal / (balance_after - interest_amount))
+    INT posted on the 1st covers the prior month, so we check if the prior month
+    overlaps with the passthrough period.
     """
+    passthrough = passthrough or []
     interest_txns = []
+    pt_adjustments = {}
+
+    # Build suffix lookup for passthrough
+    pt_by_suffix = {}
+    for pt in passthrough:
+        pt_by_suffix.setdefault(pt["account_suffix"], []).append(pt)
 
     for subdir in ["personal", "corporate"]:
         txn_dir = os.path.join(folder, "transactions", subdir)
         if not os.path.isdir(txn_dir):
             continue
         for fpath in sorted(glob.glob(os.path.join(txn_dir, "**", "*.csv"), recursive=True)):
+            fname = os.path.basename(fpath)
+
+            # Check if this file matches any passthrough account
+            file_pts = []
+            for suffix, pts in pt_by_suffix.items():
+                if suffix in fname:
+                    file_pts.extend(pts)
+
             with open(fpath, newline="", encoding="utf-8-sig") as f:
                 reader = csv.DictReader(f)
                 if "transaction" not in (reader.fieldnames or []):
@@ -490,11 +574,38 @@ def extract_bank_interest(folder: str) -> list:
                     amount = float(row["amount"])
                     if amount <= 0:
                         continue
-                    date = datetime.strptime(row["date"], "%Y-%m-%d").date()
-                    interest_txns.append({"date": date, "amount": amount, "account": account})
+                    dt = datetime.strptime(row["date"], "%Y-%m-%d").date()
+
+                    # Check for passthrough adjustment
+                    adjustment = 0.0
+                    if file_pts:
+                        balance = float(row.get("balance", 0))
+                        for pt in file_pts:
+                            # INT on 1st covers prior month — check overlap
+                            if dt.month == 1:
+                                prior_start = date(dt.year - 1, 12, 1)
+                                prior_end = date(dt.year - 1, 12, 31)
+                            else:
+                                prior_start = date(dt.year, dt.month - 1, 1)
+                                prior_end = dt.replace(day=1) - timedelta(days=1)
+
+                            if pt["start_date"] <= prior_end and pt["end_date"] >= prior_start:
+                                balance_before = balance - amount
+                                if balance_before > 0:
+                                    sarah_pct = min(1.0, pt["principal"] / balance_before)
+                                    adj = round(amount * sarah_pct, 2)
+                                    adjustment += adj
+                                    pt_adjustments[pt["description"]] = (
+                                        pt_adjustments.get(pt["description"], 0.0) + adj
+                                    )
+
+                    adjusted_amount = round(amount - adjustment, 2)
+                    if adjusted_amount > 0:
+                        interest_txns.append({"date": dt, "amount": adjusted_amount, "account": account})
 
     interest_txns.sort(key=lambda t: t["date"], reverse=True)
-    return interest_txns
+    pt_adjustments = {k: round(v, 2) for k, v in pt_adjustments.items()}
+    return interest_txns, pt_adjustments
 
 
 def extract_corporate_income(folder: str) -> dict | None:
