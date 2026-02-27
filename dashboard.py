@@ -823,10 +823,18 @@ def generate_html(data: dict, ai_html: str | None = None,
     # ── Net Worth card ──
     net_worth_card = ""
     if passive_income:
-        nw_accessible = passive_income.get("accessible_balance", 0)
-        nw_registered = passive_income.get("registered_balance", 0)
-        nw_property = passive_income.get("property_balance", 0)
-        nw_corporate = passive_income.get("corporate_balance", 0)
+        nw_hist = passive_income.get("net_worth_history")
+        if nw_hist:
+            latest = nw_hist[-1]
+            nw_accessible = latest["accessible"]
+            nw_registered = latest["registered"]
+            nw_property = latest["property"]
+            nw_corporate = latest["corporate"]
+        else:
+            nw_accessible = passive_income.get("accessible_balance", 0)
+            nw_registered = passive_income.get("registered_balance", 0)
+            nw_property = passive_income.get("property_balance", 0)
+            nw_corporate = passive_income.get("corporate_balance", 0)
         nw_total = nw_accessible + nw_registered + nw_property + nw_corporate
 
         def fmt_compact(val):
