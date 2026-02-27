@@ -74,8 +74,8 @@ def extract_passive_income(folder: str, source: str = "csv") -> dict | None:
     corporate_accts = []
     property_accts = []
 
-    # Parse statement balances only in statements mode
-    stmt_balances = parse_statement_balances(folder) if source == "statements" else {}
+    # Always parse statements so balance_history is available in both modes
+    stmt_balances = parse_statement_balances(folder)
 
     # Build suffix → statement balance lookup (also match suffixes that are
     # a trailing substring of the statement key, e.g. CSV "6905CAD" matches
@@ -152,7 +152,13 @@ def extract_passive_income(folder: str, source: str = "csv") -> dict | None:
 
             # Parse investment start date
             start_date = None
-            if col_start_date is not None and col_start_date < len(row):
+            if source == "statements" and stmt and stmt.get("balance_history"):
+                # Derive from earliest balance_history entry
+                try:
+                    start_date = datetime.strptime(stmt["balance_history"][0]["date"][:10], "%Y-%m-%d").date()
+                except (ValueError, TypeError, KeyError):
+                    pass
+            if start_date is None and col_start_date is not None and col_start_date < len(row):
                 date_str = row[col_start_date].strip()
                 for fmt in ("%B %d, %Y", "%b %d, %Y", "%b %d %Y", "%Y-%m-%d"):
                     try:
@@ -189,7 +195,10 @@ def extract_passive_income(folder: str, source: str = "csv") -> dict | None:
 
             # Income vs Growth split
             total_return_annual = total_value * return_pct / 100
-            strategy = row[col_strategy].strip() if col_strategy is not None and col_strategy < len(row) else ""
+            if source == "statements":
+                strategy = ""
+            else:
+                strategy = row[col_strategy].strip() if col_strategy is not None and col_strategy < len(row) else ""
 
             csv_yield = None
             if col_yield is not None and col_yield < len(row):
@@ -226,7 +235,11 @@ def extract_passive_income(folder: str, source: str = "csv") -> dict | None:
                 else:
                     growth_annual = 0.0
 
-            brokerage = row[col_brokerage].strip().replace("\n", " ") if col_brokerage < len(row) else ""
+            if source == "statements" and stmt:
+                # Derive brokerage from statement source (e.g. "Wealthsimple statement" → "Wealthsimple")
+                brokerage = stmt["source"].replace(" statement", "")
+            else:
+                brokerage = row[col_brokerage].strip().replace("\n", " ") if col_brokerage < len(row) else ""
 
             entry = {
                 "account": account,

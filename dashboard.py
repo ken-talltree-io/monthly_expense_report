@@ -1832,8 +1832,8 @@ def main():
     parser.add_argument("--path", default=".", help="Folder containing CSV files (default: current directory)")
     parser.add_argument("--ai", action="store_true", help="Generate AI-powered recommendations (requires ANTHROPIC_API_KEY)")
     parser.add_argument("--no-ai", action="store_true", help="Skip AI recommendations even if cached")
-    parser.add_argument("--source", choices=["csv", "statements"], default="csv",
-                        help="Financial data source: csv (portfolio.csv) or statements (PDF statements)")
+    parser.add_argument("--source", choices=["csv", "statements"], default="statements",
+                        help="Financial data source: statements (PDF statements, default) or csv (portfolio.csv)")
     args = parser.parse_args()
 
     folder = os.path.abspath(args.path)
