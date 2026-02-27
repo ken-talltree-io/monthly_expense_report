@@ -925,8 +925,6 @@ def generate_html(data: dict, ai_html: str | None = None,
         nwh_corporate = json.dumps([r["corporate"] for r in nw_history])
         nwh_property = json.dumps([r["property"] for r in nw_history])
         nwh_liabilities = json.dumps([r.get("liabilities", 0) for r in nw_history])
-        nwh_total = json.dumps([r["total"] for r in nw_history])
-
         # Summary: total change over period
         first_total = nw_history[0]["total"]
         last_total = nw_history[-1]["total"]
@@ -1010,26 +1008,13 @@ def generate_html(data: dict, ai_html: str | None = None,
                     label: 'Liabilities',
                     data: {nwh_liabilities},
                     borderColor: '#e15759',
-                    backgroundColor: 'transparent',
-                    fill: false,
+                    backgroundColor: 'rgba(225, 87, 89, 0.25)',
+                    fill: 'origin',
                     borderDash: [6, 3],
                     tension: 0.3,
                     pointRadius: 0,
                     borderWidth: 2,
-                    yAxisID: 'y1'
-                }},
-                {{
-                    label: 'Total',
-                    data: {nwh_total},
-                    borderColor: 'rgba(100, 100, 100, 0.7)',
-                    backgroundColor: 'transparent',
-                    fill: false,
-                    borderDash: [4, 3],
-                    tension: 0.3,
-                    pointRadius: 0,
-                    borderWidth: 2,
-                    order: 0,
-                    yAxisID: 'y1'
+                    stack: 'liabilities'
                 }}
             ]
         }},
@@ -1044,7 +1029,9 @@ def generate_html(data: dict, ai_html: str | None = None,
                     callbacks: {{
                         label: function(ctx) {{
                             var v = ctx.parsed.y;
-                            var fmt = v >= 1000000 ? '$' + (v/1000000).toFixed(2) + 'M' : '$' + (v/1000).toFixed(0) + 'k';
+                            var abs = Math.abs(v);
+                            var fmt = abs >= 1000000 ? '$' + (abs/1000000).toFixed(2) + 'M' : '$' + (abs/1000).toFixed(0) + 'k';
+                            if (v < 0) fmt = '-' + fmt;
                             return ctx.dataset.label + ': ' + fmt;
                         }}
                     }}
@@ -1056,14 +1043,12 @@ def generate_html(data: dict, ai_html: str | None = None,
                     stacked: true,
                     ticks: {{
                         callback: function(v) {{
-                            return v >= 1000000 ? '$' + (v/1000000).toFixed(1) + 'M' : '$' + (v/1000).toFixed(0) + 'k';
+                            var abs = Math.abs(v);
+                            var fmt = abs >= 1000000 ? '$' + (abs/1000000).toFixed(1) + 'M' : '$' + (abs/1000).toFixed(0) + 'k';
+                            return v < 0 ? '-' + fmt : fmt;
                         }}
                     }}
                 }},
-                y1: {{
-                    display: false,
-                    stacked: false
-                }}
             }}
         }}
     }});
@@ -1071,19 +1056,8 @@ def generate_html(data: dict, ai_html: str | None = None,
     var nwhCb = document.getElementById('nwhExclProperty');
     if (nwhCb) {{
         nwhCb.addEventListener('change', function() {{
-            var hide = this.checked;
             // Property is dataset index 3
-            nwhChart.data.datasets[3].hidden = hide;
-            // Recalculate Total line (assets + liabilities)
-            var accessible = {nwh_accessible};
-            var registered = {nwh_registered};
-            var corporate = {nwh_corporate};
-            var property = {nwh_property};
-            var liabilities = {nwh_liabilities};
-            var newTotal = accessible.map(function(v, i) {{
-                return v + registered[i] + corporate[i] + (hide ? 0 : property[i]) + liabilities[i];
-            }});
-            nwhChart.data.datasets[5].data = newTotal;
+            nwhChart.data.datasets[3].hidden = this.checked;
             nwhChart.update();
         }});
     }}"""
