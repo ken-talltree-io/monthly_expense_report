@@ -199,6 +199,24 @@ def generate_html(data: dict, ai_html: str | None = None,
             {month_cells}
         </tr>"""
 
+    # Fixed costs breakdown rows (reuse sub_months for consistency)
+    num_months = len(sub_months)
+    fixed_rows = ""
+    fixed_monthly_totals = {m: 0 for m in sub_months}
+    for merchant, total, month_amounts in fixed_detail:
+        avg_per_month = total / num_months if num_months else 0
+        month_cells = ""
+        for m in sub_months:
+            val = month_amounts.get(m, 0)
+            if val > 0:
+                fixed_monthly_totals[m] += val
+                month_cells += f"<td style='text-align:right'>{money(val)}</td>"
+            else:
+                month_cells += "<td style='text-align:center;color:#ccc'>—</td>"
+        fixed_rows += f"<tr><td><strong>{merchant}</strong></td><td style='text-align:right'>{money(avg_per_month)}</td>{month_cells}</tr>"
+    fixed_footer_cells = "".join(f"<td style='text-align:right'>{money(fixed_monthly_totals[m])}</td>" for m in sub_months)
+    fixed_avg_per_month = money(fixed_total / num_months if num_months else 0)
+
     # Interac e-Transfer detail table (grouped by month, sorted by date)
     etransfer_txns = sorted(
         [t for txns in data["monthly_txns"].values() for t in txns if t["merchant"] == "Interac e-Transfer"],
@@ -1388,6 +1406,21 @@ def generate_html(data: dict, ai_html: str | None = None,
 
     passive_section = ""
     if passive_income:
+        # Build empirical return lookup by account name
+        empirical_by_account = {}
+        eg = passive_income.get("empirical_growth")
+        if eg and eg.get("per_account"):
+            for pa in eg["per_account"]:
+                empirical_by_account[pa["account"]] = pa
+
+        def empirical_cell(acct_name: str) -> str:
+            pa = empirical_by_account.get(acct_name)
+            if not pa:
+                return "<td style='text-align:right;color:var(--muted)'>—</td>"
+            ann = (1 + pa["monthly_return"]) ** 12 - 1
+            color = "#27ae60" if ann >= 0 else "#e74c3c"
+            return f"<td style='text-align:right;color:{color}'>{ann*100:.1f}%/yr<br><span style='font-size:0.8em;color:var(--muted)'>{pa['data_points']} pts</span></td>"
+
         # Accessible accounts table rows (sorted by return % desc)
         acc_total_balance = passive_income["accessible_balance"]
         acc_total_income = passive_income["annual_income"]
@@ -1396,8 +1429,14 @@ def generate_html(data: dict, ai_html: str | None = None,
         acc_total_return = acc_total_income + acc_total_growth
         acc_avg_return = (acc_total_return / acc_total_balance * 100) if acc_total_balance else 0
 
+        def _sort_return(a):
+            pa = empirical_by_account.get(a["account"])
+            if pa:
+                return ((1 + pa["monthly_return"]) ** 12 - 1) * 100
+            return a["return_pct"]
+
         acc_sorted = sorted(passive_income["accounts"],
-                            key=lambda a: a['return_pct'],
+                            key=_sort_return,
                             reverse=True)
 
         acc_rows = ""
@@ -1408,7 +1447,8 @@ def generate_html(data: dict, ai_html: str | None = None,
                 f"{return_cell(a)}"
                 f"{income_cell(a)}"
                 f"{growth_cell(a)}"
-                f"{vs_avg_cell(a, acc_avg_return)}</tr>"
+                f"{vs_avg_cell(a, acc_avg_return)}"
+                f"{empirical_cell(a['account'])}</tr>"
             )
 
         # Registered accounts table (RRSP + RESP — TFSAs are in Accessible)
@@ -1418,7 +1458,7 @@ def generate_html(data: dict, ai_html: str | None = None,
             reg_avg_return = (reg_total_return / passive_income['registered_balance'] * 100) if passive_income['registered_balance'] else 0
 
             reg_sorted = sorted(passive_income["registered_accounts"],
-                                 key=lambda a: a['return_pct'],
+                                 key=_sort_return,
                                  reverse=True)
             reg_rows = ""
             for a in reg_sorted:
@@ -1428,16 +1468,17 @@ def generate_html(data: dict, ai_html: str | None = None,
                     f"{return_cell(a)}"
                     f"{income_cell(a)}"
                     f"{growth_cell(a)}"
-                    f"{vs_avg_cell(a, reg_avg_return)}</tr>"
+                    f"{vs_avg_cell(a, reg_avg_return)}"
+                    f"{empirical_cell(a['account'])}</tr>"
                 )
             reg_html = f"""
     <h3 style="margin-top:30px">Registered Accounts <span style="font-weight:400;color:var(--muted);font-size:0.85em">(RRSP, RESP — not accessible without tax penalty)</span></h3>
     <table class="data-table" style="max-width:100%">
-        <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Income/yr</th><th style="text-align:right">Growth/yr</th><th style="text-align:right">vs Avg</th></tr></thead>
+        <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Income/yr</th><th style="text-align:right">Growth/yr</th><th style="text-align:right">vs Avg</th><th style="text-align:right">Empirical</th></tr></thead>
         <tbody>{reg_rows}</tbody>
         <tfoot>
-            <tr style="font-weight:700"><td colspan="3">Total Registered</td><td style="text-align:right">{money(passive_income['registered_balance'])}</td><td style="text-align:right">{reg_avg_return:.1f}%</td><td style="text-align:right">{money(passive_income['registered_annual'])}</td><td style="text-align:right">{money(passive_income.get('registered_growth', 0))}</td><td></td></tr>
-            <tr style="color:var(--muted)"><td colspan="7">Monthly Income</td><td style="text-align:right">{money(passive_income['registered_monthly'])}</td></tr>
+            <tr style="font-weight:700"><td colspan="3">Total Registered</td><td style="text-align:right">{money(passive_income['registered_balance'])}</td><td style="text-align:right">{reg_avg_return:.1f}%</td><td style="text-align:right">{money(passive_income['registered_annual'])}</td><td style="text-align:right">{money(passive_income.get('registered_growth', 0))}</td><td></td><td></td></tr>
+            <tr style="color:var(--muted)"><td colspan="8">Monthly Income</td><td style="text-align:right">{money(passive_income['registered_monthly'])}</td></tr>
         </tfoot>
     </table>"""
 
@@ -1451,11 +1492,11 @@ def generate_html(data: dict, ai_html: str | None = None,
     <p class="section-desc">Yield and growth from personal investment accounts — accessible and registered holdings</p>
     <h3>Accessible Accounts</h3>
     <table class="data-table" style="max-width:100%">
-        <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Income/yr</th><th style="text-align:right">Growth/yr</th><th style="text-align:right">vs Avg</th></tr></thead>
+        <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Income/yr</th><th style="text-align:right">Growth/yr</th><th style="text-align:right">vs Avg</th><th style="text-align:right">Empirical</th></tr></thead>
         <tbody>{acc_rows}</tbody>
         <tfoot>
-            <tr style="font-weight:700"><td colspan="3">Total Accessible</td><td style="text-align:right">{money(acc_total_balance)}</td><td style="text-align:right">{acc_avg_return:.1f}%</td><td style="text-align:right">{money(acc_total_income)}</td><td style="text-align:right">{money(acc_total_growth)}</td><td></td></tr>
-            <tr style="color:var(--muted)"><td colspan="7">Monthly Income</td><td style="text-align:right">{money(acc_monthly)}</td></tr>
+            <tr style="font-weight:700"><td colspan="3">Total Accessible</td><td style="text-align:right">{money(acc_total_balance)}</td><td style="text-align:right">{acc_avg_return:.1f}%</td><td style="text-align:right">{money(acc_total_income)}</td><td style="text-align:right">{money(acc_total_growth)}</td><td></td><td></td></tr>
+            <tr style="color:var(--muted)"><td colspan="8">Monthly Income</td><td style="text-align:right">{money(acc_monthly)}</td></tr>
         </tfoot>
     </table>
     {reg_html}
@@ -1675,6 +1716,8 @@ canvas {{ max-width: 100%; }}
     </table>
     </div>
 </section>
+
+{'<section id="fixed-costs" class="card"><h2>Fixed Costs Breakdown</h2><p class="section-desc">All fixed-cost merchants (utilities, insurance, etc.) with monthly amounts over the last 6 months.</p><div class="table-scroll"><table class="data-table"><thead><tr><th>Merchant</th><th style="text-align:right">Avg/Mo</th>' + sub_month_headers + '</tr></thead><tbody>' + fixed_rows + '</tbody><tfoot><tr style="font-weight:700"><td>Total Fixed Costs</td><td style="text-align:right">' + fixed_avg_per_month + '/mo</td>' + fixed_footer_cells + '</tr></tfoot></table></div></section>' if fixed_detail else ''}
 
 {'<section id="interac-transfers" class="card"><h2>Interac e-Transfer Details</h2><p class="section-desc">All outgoing e-Transfers &mdash; ' + str(len(etransfer_txns)) + ' transactions totalling ' + money(etransfer_total) + '</p><table class="data-table"><thead><tr><th>Date</th><th>Note</th><th style="text-align:right">Amount</th></tr></thead><tbody>' + etransfer_rows + '</tbody></table></section>' if etransfer_txns else ''}
 </div>
