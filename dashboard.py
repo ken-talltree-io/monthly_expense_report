@@ -1389,21 +1389,6 @@ def generate_html(data: dict, ai_html: str | None = None,
         color = "#27ae60" if val > 0 else "#e74c3c"
         return f"<td style='text-align:right;color:{color}'>{money(val)}</td>"
 
-    def vs_avg_cell(a: dict, avg_return: float) -> str:
-        """Render vs Avg as +/- percentage points of return vs bucket average."""
-        diff_pp = a["return_pct"] - avg_return
-        new_badge = ""
-        if a.get('start_date'):
-            age_days = (datetime.now().date() - a['start_date']).days
-            age_months = age_days // 30
-            if age_months < 6:
-                label = f"{age_months} mo" if age_months > 0 else "< 1 mo"
-                new_badge = f"<br><span style='font-size:0.8em;color:var(--muted)'>est. {label} ago — monitor</span>"
-        if diff_pp >= 0:
-            return f"<td style='text-align:right;color:#27ae60'>+{diff_pp:.1f} pp</td>"
-        else:
-            return f"<td style='text-align:right;color:#e67e22'>{diff_pp:.1f} pp{new_badge}</td>"
-
     passive_section = ""
     if passive_income:
         # Build empirical return lookup by account name
@@ -1427,7 +1412,6 @@ def generate_html(data: dict, ai_html: str | None = None,
         acc_total_growth = passive_income.get("annual_growth", 0)
         acc_monthly = passive_income["monthly_income"]
         acc_total_return = acc_total_income + acc_total_growth
-        acc_avg_return = (acc_total_return / acc_total_balance * 100) if acc_total_balance else 0
 
         def _sort_return(a):
             pa = empirical_by_account.get(a["account"])
@@ -1447,7 +1431,6 @@ def generate_html(data: dict, ai_html: str | None = None,
                 f"{return_cell(a)}"
                 f"{income_cell(a)}"
                 f"{growth_cell(a)}"
-                f"{vs_avg_cell(a, acc_avg_return)}"
                 f"{empirical_cell(a['account'])}</tr>"
             )
 
@@ -1455,7 +1438,6 @@ def generate_html(data: dict, ai_html: str | None = None,
         reg_html = ""
         if passive_income.get("registered_accounts"):
             reg_total_return = passive_income['registered_annual'] + passive_income.get('registered_growth', 0)
-            reg_avg_return = (reg_total_return / passive_income['registered_balance'] * 100) if passive_income['registered_balance'] else 0
 
             reg_sorted = sorted(passive_income["registered_accounts"],
                                  key=_sort_return,
@@ -1468,17 +1450,16 @@ def generate_html(data: dict, ai_html: str | None = None,
                     f"{return_cell(a)}"
                     f"{income_cell(a)}"
                     f"{growth_cell(a)}"
-                    f"{vs_avg_cell(a, reg_avg_return)}"
                     f"{empirical_cell(a['account'])}</tr>"
                 )
             reg_html = f"""
     <h3 style="margin-top:30px">Registered Accounts <span style="font-weight:400;color:var(--muted);font-size:0.85em">(RRSP, RESP — not accessible without tax penalty)</span></h3>
     <table class="data-table" style="max-width:100%">
-        <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Income/yr</th><th style="text-align:right">Growth/yr</th><th style="text-align:right">vs Avg</th><th style="text-align:right">Empirical</th></tr></thead>
+        <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Income/yr</th><th style="text-align:right">Growth/yr</th><th style="text-align:right">Empirical</th></tr></thead>
         <tbody>{reg_rows}</tbody>
         <tfoot>
-            <tr style="font-weight:700"><td colspan="3">Total Registered</td><td style="text-align:right">{money(passive_income['registered_balance'])}</td><td style="text-align:right">{reg_avg_return:.1f}%</td><td style="text-align:right">{money(passive_income['registered_annual'])}</td><td style="text-align:right">{money(passive_income.get('registered_growth', 0))}</td><td></td><td></td></tr>
-            <tr style="color:var(--muted)"><td colspan="8">Monthly Income</td><td style="text-align:right">{money(passive_income['registered_monthly'])}</td></tr>
+            <tr style="font-weight:700"><td colspan="3">Total Registered</td><td style="text-align:right">{money(passive_income['registered_balance'])}</td><td style="text-align:right"></td><td style="text-align:right">{money(passive_income['registered_annual'])}</td><td style="text-align:right">{money(passive_income.get('registered_growth', 0))}</td><td></td></tr>
+            <tr style="color:var(--muted)"><td colspan="7">Monthly Income</td><td style="text-align:right">{money(passive_income['registered_monthly'])}</td></tr>
         </tfoot>
     </table>"""
 
@@ -1492,11 +1473,11 @@ def generate_html(data: dict, ai_html: str | None = None,
     <p class="section-desc">Yield and growth from personal investment accounts — accessible and registered holdings</p>
     <h3>Accessible Accounts</h3>
     <table class="data-table" style="max-width:100%">
-        <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Income/yr</th><th style="text-align:right">Growth/yr</th><th style="text-align:right">vs Avg</th><th style="text-align:right">Empirical</th></tr></thead>
+        <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Income/yr</th><th style="text-align:right">Growth/yr</th><th style="text-align:right">Empirical</th></tr></thead>
         <tbody>{acc_rows}</tbody>
         <tfoot>
-            <tr style="font-weight:700"><td colspan="3">Total Accessible</td><td style="text-align:right">{money(acc_total_balance)}</td><td style="text-align:right">{acc_avg_return:.1f}%</td><td style="text-align:right">{money(acc_total_income)}</td><td style="text-align:right">{money(acc_total_growth)}</td><td></td><td></td></tr>
-            <tr style="color:var(--muted)"><td colspan="8">Monthly Income</td><td style="text-align:right">{money(acc_monthly)}</td></tr>
+            <tr style="font-weight:700"><td colspan="3">Total Accessible</td><td style="text-align:right">{money(acc_total_balance)}</td><td style="text-align:right"></td><td style="text-align:right">{money(acc_total_income)}</td><td style="text-align:right">{money(acc_total_growth)}</td><td></td></tr>
+            <tr style="color:var(--muted)"><td colspan="7">Monthly Income</td><td style="text-align:right">{money(acc_monthly)}</td></tr>
         </tfoot>
     </table>
     {reg_html}
