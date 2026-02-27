@@ -5,3 +5,4 @@ run-dashboard.sh
 # Generated output
 dashboard.html
 
+.coverage
