@@ -443,21 +443,25 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                 sk_year, sk_month = sort_key // 100, sort_key % 100
                 iso_date = f"{sk_year}-{sk_month:02d}-28"
 
-                # Parse per-account contributions/redemptions from Account Activity sections
+                # Parse per-account contributions/redemptions and beginning values
                 sh_flows: dict[str, tuple[float, float]] = {}
+                sh_begin: dict[str, float] = {}
                 for acct_m in re.finditer(r"Account (\d{7})\s+\w", q_text):
                     acct_num = acct_m.group(1)
                     # Scope to this account's section
                     next_acct = re.search(r"Account \d{7}", q_text[acct_m.end():])
                     end_pos = (acct_m.end() + next_acct.start()) if next_acct else len(q_text)
                     section = q_text[acct_m.start():end_pos]
-                    # Current Period is the first number on the Contributions/Redemptions lines
+                    # Current Period is the first number on each Account Activity line
                     contrib_m = re.search(r"Contributions\s+([\d,.]+)", section)
                     redemp_m = re.search(r"Redemptions\s+[-]?([\d,.]+)", section)
+                    begin_m = re.search(r"Beginning Value\s+([\d,.]+)", section)
                     deposits = float(contrib_m.group(1).replace(",", "")) if contrib_m else 0.0
                     withdrawals = float(redemp_m.group(1).replace(",", "")) if redemp_m else 0.0
                     if acct_num not in sh_flows:
                         sh_flows[acct_num] = (deposits, withdrawals)
+                        if begin_m:
+                            sh_begin[acct_num] = float(begin_m.group(1).replace(",", ""))
 
                 for row_m in re.finditer(
                     r"^(\d{7})\s+.+?\s+([\d,]+\.\d{2})\s*$",
@@ -472,6 +476,25 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                             "balance": bal,
                             "deposits": deps,
                             "withdrawals": wdrs,
+                        })
+
+            # Prepend beginning value from oldest PDF as the opening data point
+            if sh_pdfs:
+                oldest_sort_key = sh_pdfs[-1][0]
+                oldest_year, oldest_month = oldest_sort_key // 100, oldest_sort_key % 100
+                # Beginning of the oldest quarter (3 months prior)
+                if oldest_month <= 3:
+                    begin_year, begin_month = oldest_year - 1, 12
+                else:
+                    begin_year, begin_month = oldest_year, oldest_month - 3
+                begin_date = f"{begin_year}-{begin_month:02d}-28"
+                for acct_num, begin_bal in sh_begin.items():
+                    if begin_bal > 0:
+                        sh_balance_history[acct_num].insert(0, {
+                            "date": begin_date,
+                            "balance": begin_bal,
+                            "deposits": 0.0,
+                            "withdrawals": 0.0,
                         })
 
             # Use latest PDF for current balance, returns, and dividends
