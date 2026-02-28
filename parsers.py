@@ -226,9 +226,19 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
         except (subprocess.TimeoutExpired, OSError):
             return ""
 
+    def _parse_cad_usd(pattern: str, text: str, fx: float | None) -> float:
+        m = re.search(pattern, text)
+        if not m:
+            return 0.0
+        total = float(m.group(1).replace(",", ""))
+        if m.group(2) and fx:
+            total += float(m.group(2).replace(",", "")) * fx
+        return total
+
     # ── Wealthsimple (individual PDFs per account) ──────────────────────────
     # Scan both personal and corporate Wealthsimple statement directories
     ws_pdfs: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    ws_perf_pdfs: dict[str, list[tuple[str, str]]] = defaultdict(list)
     for ownership in ["personal", "corporate"]:
         ws_dir = os.path.join(stmt_dir, ownership, "Wealthsimple")
         if not os.path.isdir(ws_dir):
@@ -238,6 +248,13 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                 continue
             if "_CRM2_" in fname:
                 continue  # skip CRM2 annual reports (return % managed in portfolio.csv)
+            if fname.startswith("Performance_"):
+                perf_parts = fname.split("_")
+                if len(perf_parts) >= 4:
+                    perf_suffix = perf_parts[1]
+                    perf_date = perf_parts[3] if len(perf_parts) > 3 else ""
+                    ws_perf_pdfs[perf_suffix].append((perf_date, os.path.join(ws_dir, fname)))
+                continue
             parts = fname.split("_")
             if len(parts) < 3:
                 continue
@@ -269,7 +286,7 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
         is_usd = suffix.upper().endswith("USD")
         if is_usd:
             fx = re.search(
-                r"\$1 USD = \$([0-9.]+) CAD", text
+                r"\$1\s?USD\s*=\s*\$([0-9.]+)\s*CAD", text
             )
             if fx:
                 fx_rate = float(fx.group(1))
@@ -281,7 +298,7 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                     if other_suffix == suffix:
                         continue
                     other_text = _pdf_text(other_files[0][1])
-                    fx = re.search(r"\$1 USD = \$([0-9.]+) CAD", other_text)
+                    fx = re.search(r"\$1\s?USD\s*=\s*\$([0-9.]+)\s*CAD", other_text)
                     if fx:
                         fx_rate = float(fx.group(1))
                         balance = round(balance * fx_rate, 2)
@@ -309,6 +326,25 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
             "balance_history": [],
         }
 
+        # Override return rate from Performance PDF if available
+        if suffix in ws_perf_pdfs:
+            perf_files = sorted(ws_perf_pdfs[suffix], key=lambda x: x[0], reverse=True)
+            perf_text = _pdf_text(perf_files[0][1])
+            if perf_text:
+                rate_m = re.search(
+                    r"Money-weighted Return Rates\s+"
+                    r"Current period\s+1 year\s+3 years\s+5 years\s+10 years\s+Since inception\s+"
+                    r"([\d.]+)%\s+([\d.]+)%\s+([\d.]+)%\s+([\d.]+)%\s+([\d.]+)%\s+([\d.]+)%",
+                    perf_text,
+                )
+                if rate_m:
+                    one_year = float(rate_m.group(2))
+                    since_inception = float(rate_m.group(6))
+                    chosen = one_year if one_year > 0 else since_inception
+                    if chosen > 0:
+                        results[suffix]["return_pct"] = chosen
+                        results[suffix]["return_source"] = "performance report"
+
         # Parse dividends + interest from ALL monthly statements for this account
         # Also extract balance history (balance, deposits, withdrawals) per month
         total_income = 0.0
@@ -319,13 +355,13 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                 continue
             # Track unique months
             months_seen.add(ds[:7] if len(ds) >= 7 else ds)
+            fx_m = re.search(r"\$1\s?USD\s*=\s*\$([0-9.]+)\s*CAD", pdf_text)
+            stmt_fx = float(fx_m.group(1)) if fx_m else None
             monthly_income = 0.0
-            div_m = re.search(r"Dividends\s+\$([\d,]+\.\d{2})", pdf_text)
-            int_m = re.search(r"Interest Earned\s+\$([\d,]+\.\d{2})", pdf_text)
-            if div_m:
-                monthly_income += float(div_m.group(1).replace(",", ""))
-            if int_m:
-                monthly_income += float(int_m.group(1).replace(",", ""))
+            monthly_income += _parse_cad_usd(
+                r"Dividends\s+\$([\d,]+\.\d{2})(?:\s+\$([\d,]+\.\d{2}))?", pdf_text, stmt_fx)
+            monthly_income += _parse_cad_usd(
+                r"Interest Earned\s+\$([\d,]+\.\d{2})(?:\s+\$([\d,]+\.\d{2}))?", pdf_text, stmt_fx)
             total_income += monthly_income
 
             # Extract balance history entry for this month
@@ -337,18 +373,18 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                 hist_bal = float(bh_m.group(1).replace(",", ""))
                 # USD conversion using this statement's fx rate
                 if is_usd:
-                    hist_fx = re.search(r"\$1 USD = \$([0-9.]+) CAD", pdf_text)
+                    hist_fx = re.search(r"\$1\s?USD\s*=\s*\$([0-9.]+)\s*CAD", pdf_text)
                     if hist_fx:
                         hist_fx_rate = float(hist_fx.group(1))
                         hist_bal = round(hist_bal * hist_fx_rate, 2)
                     else:
                         continue  # Can't convert; skip this month
 
-                # Parse deposits and withdrawals (first match = CAD column)
-                dep_m = re.search(r"Deposits\s+\$([\d,]+\.\d{2})", pdf_text)
-                wdr_m = re.search(r"Withdrawals\s+\$([\d,]+\.\d{2})", pdf_text)
-                hist_dep = float(dep_m.group(1).replace(",", "")) if dep_m else 0.0
-                hist_wdr = float(wdr_m.group(1).replace(",", "")) if wdr_m else 0.0
+                # Parse deposits and withdrawals (CAD + optional USD column)
+                hist_dep = _parse_cad_usd(
+                    r"Deposits\s+\$([\d,]+\.\d{2})(?:\s+\$([\d,]+\.\d{2}))?", pdf_text, stmt_fx)
+                hist_wdr = _parse_cad_usd(
+                    r"Withdrawals\s+\$([\d,]+\.\d{2})(?:\s+\$([\d,]+\.\d{2}))?", pdf_text, stmt_fx)
 
                 # Parse statement end date
                 hist_dm = re.search(
@@ -482,85 +518,93 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
         "january": 1, "february": 2, "march": 3, "april": 4,
         "may": 5, "june": 6, "july": 7, "august": 8,
         "september": 9, "october": 10, "november": 11, "december": 12,
+        "jan": 1, "feb": 2, "mar": 3, "apr": 4,
+        "jun": 6, "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
     }
     for ownership in ["personal", "corporate"]:
-        sc_dir = os.path.join(stmt_dir, ownership, "Scotiabank Chequing")
-        if not os.path.isdir(sc_dir):
-            continue
-
-        # Collect PDFs and sort by date (most recent first)
-        sc_pdfs = []
-        for fname in os.listdir(sc_dir):
-            if not fname.lower().endswith(".pdf"):
+        sc_dirs = [
+            os.path.join(stmt_dir, ownership, "Scotiabank Chequing"),
+            os.path.join(stmt_dir, ownership, "Scotiabank Ken Personal"),
+        ]
+        for sc_dir in sc_dirs:
+            if not os.path.isdir(sc_dir):
                 continue
-            name = os.path.splitext(fname)[0]
-            # Personal: "February 2026 e-statement"
-            # Corporate: "Tall Tree Technology - DebitCard - January 2026 e-statement"
-            m = re.search(r"(\w+)\s+(\d{4})\s+e-statement", name, re.IGNORECASE)
-            if m:
-                month_str = m.group(1).lower()
-                year_str = m.group(2)
-                if month_str in MONTH_NAMES:
-                    sort_key = int(year_str) * 100 + MONTH_NAMES[month_str]
-                    sc_pdfs.append((sort_key, os.path.join(sc_dir, fname)))
-        if not sc_pdfs:
-            continue
 
-        sc_pdfs.sort(reverse=True)
-        _, latest_pdf = sc_pdfs[0]
-        text = _pdf_text(latest_pdf)
-        if not text:
-            continue
+            # Collect PDFs and sort by date (most recent first)
+            sc_pdfs = []
+            for fname in os.listdir(sc_dir):
+                if not fname.lower().endswith(".pdf"):
+                    continue
+                name = os.path.splitext(fname)[0]
+                # "February 2026 e-statement" or "Tall Tree Technology - DebitCard - January 2026 e-statement"
+                m = re.search(r"(\w+)\s+(\d{4})\s+e-statement", name, re.IGNORECASE)
+                # "Scotiabank - Ken Personal - Jul 2025"
+                if not m:
+                    m = re.search(r"-\s+(\w+)\s+(\d{4})$", name)
+                if m:
+                    month_str = m.group(1).lower()
+                    year_str = m.group(2)
+                    if month_str in MONTH_NAMES:
+                        sort_key = int(year_str) * 100 + MONTH_NAMES[month_str]
+                        sc_pdfs.append((sort_key, os.path.join(sc_dir, fname)))
+            if not sc_pdfs:
+                continue
 
-        # Parse account number (Scotiabank format: XXXXX XXXXX XX)
-        acct_m = re.search(r"(\d{5})\s+(\d{5})\s+(\d{2})", text)
-        if not acct_m:
-            continue
-        acct_num = acct_m.group(1) + acct_m.group(2) + acct_m.group(3)
+            sc_pdfs.sort(reverse=True)
+            _, latest_pdf = sc_pdfs[0]
+            text = _pdf_text(latest_pdf)
+            if not text:
+                continue
 
-        if ownership == "personal":
-            # Personal: "Closing Balance on February 17, 2026:  $2,382.71"
-            bal_m = re.search(
-                r"Closing Balance on (.+?)[\s:]+\$([0-9,]+\.\d{2})", text
-            )
-            if bal_m:
-                balance = float(bal_m.group(2).replace(",", ""))
-                stmt_date = bal_m.group(1).strip()
-                results[acct_num] = {
-                    "balance": balance,
-                    "date": stmt_date,
-                    "source": "Scotiabank statement",
-                    "return_pct": None,
-                    "dividends_annual": None,
-                }
-        else:
-            # Corporate: last balance from transaction lines
-            # Format: MM/DD/YYYY  DESCRIPTION  amount  amount  balance
-            last_balance = None
-            stmt_date = ""
-            # Parse statement end date from line with account number
-            # Format: "Business Account  40360 01202 19  Dec 31 2025  Jan 30 2026"
-            to_m = re.search(
-                r"(\d{5}\s+\d{5}\s+\d{2})\s+\w{3}\s+\d{1,2}\s+\d{4}\s+(\w{3}\s+\d{1,2}\s+\d{4})",
-                text,
-            )
-            if to_m:
-                stmt_date = to_m.group(2)
-            for line in text.split("\n"):
-                line = line.strip()
-                if re.match(r"\d{2}/\d{2}/\d{4}\s+", line):
-                    # Find rightmost dollar amount (the balance column)
-                    amounts = re.findall(r"([\d,]+\.\d{2})", line)
-                    if amounts:
-                        last_balance = float(amounts[-1].replace(",", ""))
-            if last_balance is not None:
-                results[acct_num] = {
-                    "balance": last_balance,
-                    "date": stmt_date,
-                    "source": "Scotiabank statement",
-                    "return_pct": None,
-                    "dividends_annual": None,
-                }
+            # Parse account number (Scotiabank format: XXXXX XXXXX XX)
+            acct_m = re.search(r"(\d{5})\s+(\d{5})\s+(\d{2})", text)
+            if not acct_m:
+                continue
+            acct_num = acct_m.group(1) + acct_m.group(2) + acct_m.group(3)
+
+            if ownership == "personal":
+                # Personal: "Closing Balance on February 17, 2026:  $2,382.71"
+                bal_m = re.search(
+                    r"Closing Balance on (.+?)[\s:]+\$([0-9,]+\.\d{2})", text
+                )
+                if bal_m:
+                    balance = float(bal_m.group(2).replace(",", ""))
+                    stmt_date = bal_m.group(1).strip()
+                    results[acct_num] = {
+                        "balance": balance,
+                        "date": stmt_date,
+                        "source": "Scotiabank statement",
+                        "return_pct": None,
+                        "dividends_annual": None,
+                    }
+            else:
+                # Corporate: last balance from transaction lines
+                # Format: MM/DD/YYYY  DESCRIPTION  amount  amount  balance
+                last_balance = None
+                stmt_date = ""
+                # Parse statement end date from line with account number
+                # Format: "Business Account  40360 01202 19  Dec 31 2025  Jan 30 2026"
+                to_m = re.search(
+                    r"(\d{5}\s+\d{5}\s+\d{2})\s+\w{3}\s+\d{1,2}\s+\d{4}\s+(\w{3}\s+\d{1,2}\s+\d{4})",
+                    text,
+                )
+                if to_m:
+                    stmt_date = to_m.group(2)
+                for line in text.split("\n"):
+                    line = line.strip()
+                    if re.match(r"\d{2}/\d{2}/\d{4}\s+", line):
+                        # Find rightmost dollar amount (the balance column)
+                        amounts = re.findall(r"([\d,]+\.\d{2})", line)
+                        if amounts:
+                            last_balance = float(amounts[-1].replace(",", ""))
+                if last_balance is not None:
+                    results[acct_num] = {
+                        "balance": last_balance,
+                        "date": stmt_date,
+                        "source": "Scotiabank statement",
+                        "return_pct": None,
+                        "dividends_annual": None,
+                    }
 
     # ── BC Property Assessments (sidecar CSV beside scanned PDFs) ───────────
     bc_dir = os.path.join(stmt_dir, "personal", "British Columbia")

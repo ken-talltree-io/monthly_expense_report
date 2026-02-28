@@ -229,8 +229,8 @@ def extract_passive_income(folder: str, source: str = "csv") -> dict | None:
                 else:
                     income_annual = 0.0
                     income_source = ""
-                # Only compute growth when we have a statement return %
-                if return_pct > 0:
+                # Only compute growth from authoritative return sources
+                if return_pct > 0 and return_source != "estimated":
                     growth_annual = total_return_annual - income_annual
                 else:
                     growth_annual = 0.0
@@ -298,11 +298,13 @@ def extract_passive_income(folder: str, source: str = "csv") -> dict | None:
     }
 
 
-def compute_empirical_growth_rate(passive_income: dict) -> dict | None:
-    """Compute weighted-average empirical monthly total return from account histories.
+def compute_twr(passive_income: dict) -> dict | None:
+    """Compute time-weighted return (TWR) per account and portfolio-wide.
 
-    Uses balance_history from statement data to compute actual observed growth,
-    adjusting for deposits/withdrawals to isolate investment returns.
+    Uses balance_history from statement data.  For each period between
+    consecutive statements the holding-period return is:
+        HPR = (B1 - B0 - net_flow) / B0
+    TWR compounds these geometrically, then annualises.
     Returns None if fewer than 3 data points are available.
     """
     all_accounts = passive_income.get("accounts", []) + passive_income.get("registered_accounts", [])
@@ -315,7 +317,8 @@ def compute_empirical_growth_rate(passive_income: dict) -> dict | None:
         if len(history) < 2:
             continue
 
-        monthly_returns = []
+        cumulative = 1.0
+        total_months = 0
         balances = []
         for i in range(1, len(history)):
             t0 = history[i - 1]
@@ -326,8 +329,7 @@ def compute_empirical_growth_rate(passive_income: dict) -> dict | None:
                 continue
 
             net_flow = t1["deposits"] - t1["withdrawals"]
-            investment_return = b1 - b0 - net_flow
-            period_return = investment_return / b0
+            period_return = (b1 - b0 - net_flow) / b0
 
             # Determine months in period from date gap
             try:
@@ -337,27 +339,27 @@ def compute_empirical_growth_rate(passive_income: dict) -> dict | None:
             except (ValueError, TypeError):
                 months_in_period = 1
 
-            # Convert period return to monthly return
             if period_return > -1:
-                monthly_return = (1 + period_return) ** (1 / months_in_period) - 1
+                cumulative *= (1 + period_return)
             else:
-                monthly_return = -1.0  # total loss
+                cumulative = 0.0
 
-            monthly_returns.append(monthly_return)
+            total_months += months_in_period
             balances.append((b0 + b1) / 2)
             all_dates.append(t0["date"][:10])
             all_dates.append(t1["date"][:10])
 
-        if monthly_returns:
-            avg_return = sum(monthly_returns) / len(monthly_returns)
+        if total_months > 0:
+            # Geometric monthly return from compounded TWR
+            monthly_return = cumulative ** (1 / total_months) - 1
             avg_balance = sum(balances) / len(balances)
             per_account.append({
                 "account": acct["account"],
-                "monthly_return": avg_return,
+                "monthly_return": monthly_return,
                 "avg_balance": avg_balance,
-                "data_points": len(monthly_returns),
+                "data_points": len(balances),
             })
-            total_data_points += len(monthly_returns)
+            total_data_points += len(balances)
 
     if total_data_points < 3:
         return None

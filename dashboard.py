@@ -32,7 +32,7 @@ from config import (
 from parsers import parse_csvs
 from income import (
     extract_passive_income,
-    compute_empirical_growth_rate,
+    compute_twr,
     compute_net_worth_history,
     extract_transfers,
     extract_bank_interest,
@@ -689,16 +689,16 @@ def generate_html(data: dict, ai_html: str | None = None,
         annual_total_return_rate = (annual_income_proj + annual_growth_proj) / accessible_balance if accessible_balance else 0
         monthly_yield_rate = annual_yield_rate / 12
 
-        # Use empirical growth rate if available (>= 3 data points), else fall back to CSV rates
-        empirical = passive_income.get("empirical_growth")
-        if empirical and empirical["data_points"] >= 3:
-            monthly_total_return_rate = empirical["monthly_growth_rate"]
-            empirical_annualized = empirical["annualized_rate"]
-            using_empirical = True
+        # Use TWR if available (>= 3 data points), else fall back to CSV rates
+        twr = passive_income.get("twr")
+        if twr and twr["data_points"] >= 3:
+            monthly_total_return_rate = twr["monthly_growth_rate"]
+            twr_annualized = twr["annualized_rate"]
+            using_twr = True
         else:
             monthly_total_return_rate = annual_total_return_rate / 12
-            empirical_annualized = None
-            using_empirical = False
+            twr_annualized = None
+            using_twr = False
         total_monthly_income = corp_monthly_takehome + monthly_passive + other_income_monthly
 
         proj_balance = accessible_balance
@@ -751,12 +751,12 @@ def generate_html(data: dict, ai_html: str | None = None,
         point_radius_json = json.dumps(point_radius)
         point_bg_json = json.dumps(point_bg)
 
-        if using_empirical:
-            d0 = datetime.strptime(empirical["date_range"][0], "%Y-%m-%d").strftime("%b %Y")
-            d1 = datetime.strptime(empirical["date_range"][1], "%Y-%m-%d").strftime("%b %Y")
+        if using_twr:
+            d0 = datetime.strptime(twr["date_range"][0], "%Y-%m-%d").strftime("%b %Y")
+            d1 = datetime.strptime(twr["date_range"][1], "%Y-%m-%d").strftime("%b %Y")
             proj_desc = (
-                f"Empirical total return: {empirical_annualized*100:.1f}%/yr "
-                f"(observed {d0} \u2013 {d1}, {empirical['data_points']} data points), "
+                f"TWR: {twr_annualized*100:.1f}%/yr "
+                f"(observed {d0} \u2013 {d1}, {twr['data_points']} data points), "
                 f"{annual_yield_rate*100:.1f}% yield, ${burn_rate:,.0f}/mo burn rate."
             )
         else:
@@ -1391,15 +1391,15 @@ def generate_html(data: dict, ai_html: str | None = None,
 
     passive_section = ""
     if passive_income:
-        # Build empirical return lookup by account name
-        empirical_by_account = {}
-        eg = passive_income.get("empirical_growth")
+        # Build TWR lookup by account name
+        twr_by_account = {}
+        eg = passive_income.get("twr")
         if eg and eg.get("per_account"):
             for pa in eg["per_account"]:
-                empirical_by_account[pa["account"]] = pa
+                twr_by_account[pa["account"]] = pa
 
-        def empirical_cell(acct_name: str) -> str:
-            pa = empirical_by_account.get(acct_name)
+        def twr_cell(acct_name: str) -> str:
+            pa = twr_by_account.get(acct_name)
             if not pa:
                 return "<td style='text-align:right;color:var(--muted)'>—</td>"
             ann = (1 + pa["monthly_return"]) ** 12 - 1
@@ -1414,7 +1414,7 @@ def generate_html(data: dict, ai_html: str | None = None,
         acc_total_return = acc_total_income + acc_total_growth
 
         def _sort_return(a):
-            pa = empirical_by_account.get(a["account"])
+            pa = twr_by_account.get(a["account"])
             if pa:
                 return ((1 + pa["monthly_return"]) ** 12 - 1) * 100
             return a["return_pct"]
@@ -1431,7 +1431,7 @@ def generate_html(data: dict, ai_html: str | None = None,
                 f"{return_cell(a)}"
                 f"{income_cell(a)}"
                 f"{growth_cell(a)}"
-                f"{empirical_cell(a['account'])}</tr>"
+                f"{twr_cell(a['account'])}</tr>"
             )
 
         # Registered accounts table (RRSP + RESP — TFSAs are in Accessible)
@@ -1450,12 +1450,12 @@ def generate_html(data: dict, ai_html: str | None = None,
                     f"{return_cell(a)}"
                     f"{income_cell(a)}"
                     f"{growth_cell(a)}"
-                    f"{empirical_cell(a['account'])}</tr>"
+                    f"{twr_cell(a['account'])}</tr>"
                 )
             reg_html = f"""
     <h3 style="margin-top:30px">Registered Accounts <span style="font-weight:400;color:var(--muted);font-size:0.85em">(RRSP, RESP — not accessible without tax penalty)</span></h3>
     <table class="data-table" style="max-width:100%">
-        <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Income/yr</th><th style="text-align:right">Growth/yr</th><th style="text-align:right">Empirical</th></tr></thead>
+        <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Income/yr</th><th style="text-align:right">Growth/yr</th><th style="text-align:right">TWR</th></tr></thead>
         <tbody>{reg_rows}</tbody>
         <tfoot>
             <tr style="font-weight:700"><td colspan="3">Total Registered</td><td style="text-align:right">{money(passive_income['registered_balance'])}</td><td style="text-align:right"></td><td style="text-align:right">{money(passive_income['registered_annual'])}</td><td style="text-align:right">{money(passive_income.get('registered_growth', 0))}</td><td></td></tr>
@@ -1473,7 +1473,7 @@ def generate_html(data: dict, ai_html: str | None = None,
     <p class="section-desc">Yield and growth from personal investment accounts — accessible and registered holdings</p>
     <h3>Accessible Accounts</h3>
     <table class="data-table" style="max-width:100%">
-        <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Income/yr</th><th style="text-align:right">Growth/yr</th><th style="text-align:right">Empirical</th></tr></thead>
+        <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Income/yr</th><th style="text-align:right">Growth/yr</th><th style="text-align:right">TWR</th></tr></thead>
         <tbody>{acc_rows}</tbody>
         <tfoot>
             <tr style="font-weight:700"><td colspan="3">Total Accessible</td><td style="text-align:right">{money(acc_total_balance)}</td><td style="text-align:right"></td><td style="text-align:right">{money(acc_total_income)}</td><td style="text-align:right">{money(acc_total_growth)}</td><td></td></tr>
@@ -1878,15 +1878,15 @@ def main():
     passive_income = extract_passive_income(folder, source=args.source)
     if passive_income:
         print(f"Portfolio passive income ({args.source}): ${passive_income['annual_income']:,.2f}/year (${passive_income['monthly_income']:,.2f}/month) from {len(passive_income['accounts'])} accounts")
-        empirical = compute_empirical_growth_rate(passive_income)
-        if empirical:
-            passive_income["empirical_growth"] = empirical
-            print(f"Empirical monthly growth rate: {empirical['monthly_growth_rate']*100:.3f}% ({empirical['annualized_rate']*100:.1f}%/yr, {empirical['data_points']} data points, {empirical['date_range'][0]} to {empirical['date_range'][1]})")
-            for pa in sorted(empirical["per_account"], key=lambda x: x["avg_balance"], reverse=True):
+        twr_result = compute_twr(passive_income)
+        if twr_result:
+            passive_income["twr"] = twr_result
+            print(f"TWR: {twr_result['monthly_growth_rate']*100:.3f}%/mo ({twr_result['annualized_rate']*100:.1f}%/yr, {twr_result['data_points']} data points, {twr_result['date_range'][0]} to {twr_result['date_range'][1]})")
+            for pa in sorted(twr_result["per_account"], key=lambda x: x["avg_balance"], reverse=True):
                 ann = (1 + pa["monthly_return"]) ** 12 - 1
                 print(f"  {pa['account']:40s}  {pa['monthly_return']*100:+.3f}%/mo  {ann*100:+.1f}%/yr  avg ${pa['avg_balance']:>12,.0f}  ({pa['data_points']} pts)")
         else:
-            print("Empirical growth: insufficient data (< 3 data points), using CSV rates")
+            print("TWR: insufficient data (< 3 data points), using CSV rates")
 
         nw_history = compute_net_worth_history(passive_income, passthrough=passthrough, liabilities=liabilities)
         if nw_history:
