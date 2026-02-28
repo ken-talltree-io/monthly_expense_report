@@ -32,7 +32,7 @@ from config import (
 from parsers import parse_csvs
 from income import (
     extract_passive_income,
-    compute_twr,
+    compute_modified_dietz,
     compute_net_worth_history,
     extract_transfers,
     extract_bank_interest,
@@ -1878,7 +1878,7 @@ def main():
     passive_income = extract_passive_income(folder, source=args.source)
     if passive_income:
         print(f"Portfolio passive income ({args.source}): ${passive_income['annual_income']:,.2f}/year (${passive_income['monthly_income']:,.2f}/month) from {len(passive_income['accounts'])} accounts")
-        twr_result = compute_twr(passive_income)
+        twr_result = compute_modified_dietz(passive_income)
         if twr_result:
             passive_income["twr"] = twr_result
             print(f"TWR: {twr_result['monthly_growth_rate']*100:.3f}%/mo ({twr_result['annualized_rate']*100:.1f}%/yr, {twr_result['data_points']} data points, {twr_result['date_range'][0]} to {twr_result['date_range'][1]})")

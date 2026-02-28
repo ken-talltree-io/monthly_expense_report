@@ -298,13 +298,14 @@ def extract_passive_income(folder: str, source: str = "csv") -> dict | None:
     }
 
 
-def compute_twr(passive_income: dict) -> dict | None:
-    """Compute time-weighted return (TWR) per account and portfolio-wide.
+def compute_modified_dietz(passive_income: dict) -> dict | None:
+    """Compute Modified Dietz return per account and portfolio-wide.
 
     Uses balance_history from statement data.  For each period between
-    consecutive statements the holding-period return is:
-        HPR = (B1 - B0 - net_flow) / B0
-    TWR compounds these geometrically, then annualises.
+    consecutive statements the return is:
+        R = (B1 - B0 - net_flow) / (B0 + 0.5 * net_flow)
+    This approximates money-weighted return by assuming flows arrive
+    mid-period.  Period returns are compounded geometrically, then annualised.
     Returns None if fewer than 3 data points are available.
     """
     all_accounts = passive_income.get("accounts", []) + passive_income.get("registered_accounts", [])
@@ -329,7 +330,11 @@ def compute_twr(passive_income: dict) -> dict | None:
                 continue
 
             net_flow = t1["deposits"] - t1["withdrawals"]
-            period_return = (b1 - b0 - net_flow) / b0
+            # Modified Dietz: weight flows at mid-period
+            denominator = b0 + 0.5 * net_flow
+            if denominator <= 0:
+                continue
+            period_return = (b1 - b0 - net_flow) / denominator
 
             # Determine months in period from date gap
             try:
