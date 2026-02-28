@@ -442,6 +442,23 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                     continue
                 sk_year, sk_month = sort_key // 100, sort_key % 100
                 iso_date = f"{sk_year}-{sk_month:02d}-28"
+
+                # Parse per-account contributions/redemptions from Account Activity sections
+                sh_flows: dict[str, tuple[float, float]] = {}
+                for acct_m in re.finditer(r"Account (\d{7})\s+\w", q_text):
+                    acct_num = acct_m.group(1)
+                    # Scope to this account's section
+                    next_acct = re.search(r"Account \d{7}", q_text[acct_m.end():])
+                    end_pos = (acct_m.end() + next_acct.start()) if next_acct else len(q_text)
+                    section = q_text[acct_m.start():end_pos]
+                    # Current Period is the first number on the Contributions/Redemptions lines
+                    contrib_m = re.search(r"Contributions\s+([\d,.]+)", section)
+                    redemp_m = re.search(r"Redemptions\s+[-]?([\d,.]+)", section)
+                    deposits = float(contrib_m.group(1).replace(",", "")) if contrib_m else 0.0
+                    withdrawals = float(redemp_m.group(1).replace(",", "")) if redemp_m else 0.0
+                    if acct_num not in sh_flows:
+                        sh_flows[acct_num] = (deposits, withdrawals)
+
                 for row_m in re.finditer(
                     r"^(\d{7})\s+.+?\s+([\d,]+\.\d{2})\s*$",
                     q_text, re.MULTILINE,
@@ -449,11 +466,12 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                     acct_num = row_m.group(1)
                     bal = float(row_m.group(2).replace(",", ""))
                     if bal > 0:
+                        deps, wdrs = sh_flows.get(acct_num, (0.0, 0.0))
                         sh_balance_history[acct_num].append({
                             "date": iso_date,
                             "balance": bal,
-                            "deposits": 0.0,
-                            "withdrawals": 0.0,
+                            "deposits": deps,
+                            "withdrawals": wdrs,
                         })
 
             # Use latest PDF for current balance, returns, and dividends
