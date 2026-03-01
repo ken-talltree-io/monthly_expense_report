@@ -1484,7 +1484,7 @@ def generate_html(data: dict, ai_html: str | None = None,
             reg_html = f"""
     <h3 style="margin-top:30px">Registered Accounts <span style="font-weight:400;color:var(--muted);font-size:0.85em">(RRSP, RESP — not accessible without tax penalty)</span></h3>
     <table class="data-table" style="max-width:100%">
-        <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Income/yr</th><th style="text-align:right">Growth/yr</th><th style="text-align:right">TWR</th></tr></thead>
+        <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right" title="All-time return reported by brokerage (performance report or statement)">Return</th><th style="text-align:right" title="Annual income from dividends, interest, or yield">Income/yr</th><th style="text-align:right" title="Annual capital appreciation (return minus income)">Growth/yr</th><th style="text-align:right" title="Modified Dietz return annualized from statement balance history">TWR</th></tr></thead>
         <tbody>{reg_rows}</tbody>
         <tfoot>
             <tr style="font-weight:700"><td colspan="3">Total Registered</td><td style="text-align:right">{money(passive_income['registered_balance'])}</td><td style="text-align:right"></td><td style="text-align:right">{money(passive_income['registered_annual'])}</td><td style="text-align:right">{money(passive_income.get('registered_growth', 0))}</td><td></td></tr>
@@ -1502,7 +1502,7 @@ def generate_html(data: dict, ai_html: str | None = None,
     <p class="section-desc">Yield and growth from personal investment accounts — accessible and registered holdings</p>
     <h3>Accessible Accounts</h3>
     <table class="data-table" style="max-width:100%">
-        <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right">Return</th><th style="text-align:right">Income/yr</th><th style="text-align:right">Growth/yr</th><th style="text-align:right">TWR</th></tr></thead>
+        <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right" title="All-time return reported by brokerage (performance report or statement)">Return</th><th style="text-align:right" title="Annual income from dividends, interest, or yield">Income/yr</th><th style="text-align:right" title="Annual capital appreciation (return minus income)">Growth/yr</th><th style="text-align:right" title="Modified Dietz return annualized from statement balance history">TWR</th></tr></thead>
         <tbody>{acc_rows}</tbody>
         <tfoot>
             <tr style="font-weight:700"><td colspan="3">Total Accessible</td><td style="text-align:right">{money(acc_total_balance)}</td><td style="text-align:right"></td><td style="text-align:right">{money(acc_total_income)}</td><td style="text-align:right">{money(acc_total_growth)}</td><td></td></tr>
