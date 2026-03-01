@@ -2131,40 +2131,12 @@ class TestExtractPassiveIncome:
     """Tests for income.extract_passive_income with mocked statements."""
 
     def _write_portfolio_csv(self, tmp_path, rows):
-        csv_path = tmp_path / "portfolio.csv"
         import csv as csv_mod
         with open(tmp_path / "portfolio.csv", "w", newline="") as f:
             w = csv_mod.writer(f)
-            w.writerow(["Account", "Brokerage", "Asset Type", "Suffix",
-                         "Total Value (CAD)", "All Time Return", "Yield",
-                         "Strategy", "Start Date"])
+            w.writerow(["Account", "Asset Type", "Acct Suffix", "Investment start date"])
             for r in rows:
                 w.writerow(r)
-
-    @patch("income.parse_statement_balances")
-    def test_csv_mode_basic(self, mock_stmts, tmp_path):
-        """CSV mode reads balances and returns from portfolio.csv."""
-        mock_stmts.return_value = {}
-        self._write_portfolio_csv(tmp_path, [
-            ("Ken TFSA", "WS", "TFSA", "WK1234CAD", "$50,000.00", "5.0%", "3.0%", "Growth", "Jan 1, 2020"),
-        ])
-        result = extract_passive_income(str(tmp_path), source="csv")
-        assert result is not None
-        assert len(result["accounts"]) == 1
-        assert result["accounts"][0]["value"] == 50000.0
-        assert result["accounts"][0]["return_pct"] == 5.0
-        assert result["accounts"][0]["income_annual"] == pytest.approx(1500.0)  # 50k * 3%
-
-    @patch("income.parse_statement_balances")
-    def test_csv_mode_rrsp_goes_to_registered(self, mock_stmts, tmp_path):
-        """RRSP accounts are routed to registered_accounts."""
-        mock_stmts.return_value = {}
-        self._write_portfolio_csv(tmp_path, [
-            ("Ken RRSP", "SH", "RRSP", "1055904", "$500,000.00", "11.4%", "", "Growth", "Jan 1, 2015"),
-        ])
-        result = extract_passive_income(str(tmp_path), source="csv")
-        assert len(result["registered_accounts"]) == 1
-        assert result["registered_accounts"][0]["type"] == "RRSP"
 
     @patch("income.parse_statement_balances")
     def test_statement_mode_uses_stmt_balance(self, mock_stmts, tmp_path):
@@ -2181,9 +2153,9 @@ class TestExtractPassiveIncome:
             }
         }
         self._write_portfolio_csv(tmp_path, [
-            ("Ken TFSA", "WS", "TFSA", "WK1234CAD", "$50,000.00", "5.0%", "3.0%", "Growth", ""),
+            ("Ken TFSA", "TFSA", "WK1234CAD", ""),
         ])
-        result = extract_passive_income(str(tmp_path), source="statements")
+        result = extract_passive_income(str(tmp_path))
         assert result is not None
         acct = result["accounts"][0]
         assert acct["value"] == 55000.0  # from statement, not CSV
@@ -2207,9 +2179,9 @@ class TestExtractPassiveIncome:
             }
         }
         self._write_portfolio_csv(tmp_path, [
-            ("ETF Income", "WS", "Non-reg", "HQ1234CAD", "$100,000.00", "", "", "", ""),
+            ("ETF Income", "Non-reg", "HQ1234CAD", ""),
         ])
-        result = extract_passive_income(str(tmp_path), source="statements")
+        result = extract_passive_income(str(tmp_path))
         acct = result["accounts"][0]
         assert acct["growth_annual"] == 0.0  # suppressed for estimated
 
@@ -2228,9 +2200,9 @@ class TestExtractPassiveIncome:
             }
         }
         self._write_portfolio_csv(tmp_path, [
-            ("Managed", "WS", "TFSA", "WK5678CAD", "$100,000.00", "", "", "", ""),
+            ("Managed", "TFSA", "WK5678CAD", ""),
         ])
-        result = extract_passive_income(str(tmp_path), source="statements")
+        result = extract_passive_income(str(tmp_path))
         acct = result["accounts"][0]
         # total_return = 100k * 10% = 10k; growth = 10k - 3k = 7k
         assert acct["growth_annual"] == pytest.approx(7000.0)
@@ -2239,7 +2211,7 @@ class TestExtractPassiveIncome:
     def test_no_portfolio_csv_returns_none(self, mock_stmts, tmp_path):
         """Returns None when portfolio.csv doesn't exist."""
         mock_stmts.return_value = {}
-        result = extract_passive_income(str(tmp_path), source="csv")
+        result = extract_passive_income(str(tmp_path))
         assert result is None
 
     @patch("income.parse_statement_balances")
@@ -2257,21 +2229,40 @@ class TestExtractPassiveIncome:
             }
         }
         self._write_portfolio_csv(tmp_path, [
-            ("Corp Savings", "WS", "Non-reg", "6905CAD", "$20,000.00", "", "", "", ""),
+            ("Corp Savings", "Non-reg", "6905CAD", ""),
         ])
-        result = extract_passive_income(str(tmp_path), source="statements")
+        result = extract_passive_income(str(tmp_path))
         assert result is not None
         assert result["accounts"][0]["value"] == 20000.0
 
     @patch("income.parse_statement_balances")
     def test_corporate_and_property_accounts(self, mock_stmts, tmp_path):
         """Corporate and Property accounts are routed correctly."""
-        mock_stmts.return_value = {}
+        mock_stmts.return_value = {
+            "WK61NR": {
+                "balance": 30000.0,
+                "date": "2025-07-31",
+                "source": "Wealthsimple statement",
+                "return_pct": 2.0,
+                "return_source": "estimated",
+                "dividends_annual": None,
+                "balance_history": [],
+            },
+            "6113": {
+                "balance": 1900000.0,
+                "date": "2025-07-31",
+                "source": "property assessment",
+                "return_pct": -5.0,
+                "return_source": "estimated",
+                "dividends_annual": None,
+                "balance_history": [],
+            },
+        }
         self._write_portfolio_csv(tmp_path, [
-            ("Tall Tree", "WS", "Corporate", "WK61NR", "$30,000.00", "2%", "", "", ""),
-            ("1829 East 2nd", "Vancouver", "Property", "6113", "$1,900,000.00", "-5%", "", "", ""),
+            ("Tall Tree", "Corporate", "WK61NR", ""),
+            ("1829 East 2nd", "Property", "6113", ""),
         ])
-        result = extract_passive_income(str(tmp_path), source="csv")
+        result = extract_passive_income(str(tmp_path))
         assert result is not None
         assert result["corporate_balance"] == 30000.0
         assert result["property_balance"] == 1900000.0

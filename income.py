@@ -56,12 +56,11 @@ def load_liabilities(folder: str) -> list[dict]:
 
 # ── Income & Transfer Extraction ─────────────────────────────────────────────
 
-def extract_passive_income(folder: str, source: str = "csv") -> dict | None:
+def extract_passive_income(folder: str) -> dict | None:
     """Extract annual passive income from investment portfolio.
 
-    source="csv":        All financials from portfolio.csv (no PDF parsing).
-    source="statements": Balances/returns/income from PDF statements;
-                         portfolio.csv still provides account list & metadata.
+    Balances/returns/income from PDF statements;
+    portfolio.csv provides account list & metadata.
     """
     portfolio_path = os.path.join(folder, "portfolio.csv")
     if not os.path.exists(portfolio_path):
@@ -95,17 +94,12 @@ def extract_passive_income(folder: str, source: str = "csv") -> dict | None:
         header = next(reader)
         h = [c.strip().lower().replace("\n", " ") for c in header]
         col_account = 0
-        col_type = next((i for i, c in enumerate(h) if "asset" in c or c == "type"), 2)
-        col_value = next((i for i, c in enumerate(h) if "total" in c and "value" in c), 4)
-        col_return = next((i for i, c in enumerate(h) if "return" in c), None)
+        col_type = next((i for i, c in enumerate(h) if "asset" in c or c == "type"), 1)
         col_start_date = next((i for i, c in enumerate(h) if "start date" in c), None)
-        col_brokerage = next((i for i, c in enumerate(h) if "brokerage" in c), 1)
         col_suffix = next((i for i, c in enumerate(h) if "suffix" in c), None)
-        col_strategy = next((i for i, c in enumerate(h) if "strategy" in c), None)
-        col_yield = next((i for i, c in enumerate(h) if "yield" in c), None)
 
         for row in reader:
-            if len(row) <= max(col_account, col_type, col_value):
+            if len(row) <= max(col_account, col_type):
                 continue
 
             account = row[col_account].strip().replace("\n", " ")
@@ -115,44 +109,25 @@ def extract_passive_income(folder: str, source: str = "csv") -> dict | None:
             if not account:
                 continue
 
-            # Parse total value: portfolio.csv overrides, then statement, then 0
-            val_str = row[col_value].strip().replace("$", "").replace(",", "")
-            csv_value = None
-            try:
-                csv_value = float(val_str)
-            except (ValueError, TypeError):
-                pass
-
             acct_suffix = row[col_suffix].strip() if col_suffix is not None and col_suffix < len(row) else ""
             stmt = _find_stmt(acct_suffix)
 
-            if source == "csv":
-                # CSV mode: balance from portfolio.csv only
-                if csv_value is not None and csv_value > 0:
-                    total_value = csv_value
-                    balance_source = "csv"
-                    statement_date = ""
-                else:
-                    total_value = 0.0
-                    balance_source = ""
-                    statement_date = ""
+            # Balance from statement
+            if stmt:
+                total_value = stmt["balance"]
+                balance_source = stmt["source"]
+                statement_date = stmt["date"]
             else:
-                # Statement mode: balance from statement only
-                if stmt:
-                    total_value = stmt["balance"]
-                    balance_source = stmt["source"]
-                    statement_date = stmt["date"]
-                else:
-                    total_value = 0.0
-                    balance_source = ""
-                    statement_date = ""
+                total_value = 0.0
+                balance_source = ""
+                statement_date = ""
 
             if total_value <= 0:
                 continue
 
             # Parse investment start date
             start_date = None
-            if source == "statements" and stmt and stmt.get("balance_history"):
+            if stmt and stmt.get("balance_history"):
                 # Derive from earliest balance_history entry
                 try:
                     start_date = datetime.strptime(stmt["balance_history"][0]["date"][:10], "%Y-%m-%d").date()
@@ -167,79 +142,36 @@ def extract_passive_income(folder: str, source: str = "csv") -> dict | None:
                     except ValueError:
                         continue
 
-            # Return %
-            rate_str = row[col_return].strip().replace("%", "") if col_return is not None and col_return < len(row) else ""
-            csv_return = None
-            if rate_str and rate_str != "TBD":
-                try:
-                    csv_return = float(rate_str)
-                except (ValueError, TypeError):
-                    pass
-
-            if source == "csv":
-                # CSV mode: return from portfolio.csv only
-                if csv_return is not None:
-                    return_pct = csv_return
-                    return_source = "csv"
-                else:
-                    return_pct = 0.0
-                    return_source = ""
+            # Return % from statement
+            if stmt and stmt.get("return_pct") is not None:
+                return_pct = stmt["return_pct"]
+                return_source = stmt.get("return_source", stmt["source"])
             else:
-                # Statement mode: return from statement only
-                if stmt and stmt.get("return_pct") is not None:
-                    return_pct = stmt["return_pct"]
-                    return_source = stmt.get("return_source", stmt["source"])
-                else:
-                    return_pct = 0.0
-                    return_source = ""
+                return_pct = 0.0
+                return_source = ""
 
             # Income vs Growth split
             total_return_annual = total_value * return_pct / 100
-            if source == "statements":
-                strategy = ""
+            strategy = ""
+
+            # Income from statement dividends
+            if stmt and stmt.get("dividends_annual") is not None:
+                income_annual = stmt["dividends_annual"]
+                income_source = "dividends"
             else:
-                strategy = row[col_strategy].strip() if col_strategy is not None and col_strategy < len(row) else ""
-
-            csv_yield = None
-            if col_yield is not None and col_yield < len(row):
-                yield_str = row[col_yield].strip().replace("%", "")
-                if yield_str:
-                    try:
-                        csv_yield = float(yield_str)
-                    except (ValueError, TypeError):
-                        pass
-
-            if source == "csv":
-                # CSV mode: income from yield% or interest strategy
-                if csv_yield is not None:
-                    income_annual = total_value * csv_yield / 100
-                    income_source = "yield"
-                elif strategy == "Interest":
-                    income_annual = total_return_annual
-                    income_source = "interest"
-                else:
-                    income_annual = 0.0
-                    income_source = ""
+                income_annual = 0.0
+                income_source = ""
+            # Only compute growth from authoritative return sources
+            if return_pct > 0 and return_source != "estimated":
                 growth_annual = total_return_annual - income_annual
             else:
-                # Statement mode: income from statement dividends only
-                if stmt and stmt.get("dividends_annual") is not None:
-                    income_annual = stmt["dividends_annual"]
-                    income_source = "dividends"
-                else:
-                    income_annual = 0.0
-                    income_source = ""
-                # Only compute growth from authoritative return sources
-                if return_pct > 0 and return_source != "estimated":
-                    growth_annual = total_return_annual - income_annual
-                else:
-                    growth_annual = 0.0
+                growth_annual = 0.0
 
-            if source == "statements" and stmt:
-                # Derive brokerage from statement source (e.g. "Wealthsimple statement" → "Wealthsimple")
+            # Derive brokerage from statement source (e.g. "Wealthsimple statement" → "Wealthsimple")
+            if stmt:
                 brokerage = stmt["source"].replace(" statement", "")
             else:
-                brokerage = row[col_brokerage].strip().replace("\n", " ") if col_brokerage < len(row) else ""
+                brokerage = ""
 
             entry = {
                 "account": account,

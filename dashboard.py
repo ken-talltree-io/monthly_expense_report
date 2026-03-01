@@ -1843,8 +1843,6 @@ def main():
     parser.add_argument("--path", default=".", help="Folder containing CSV files (default: current directory)")
     parser.add_argument("--ai", action="store_true", help="Generate AI-powered recommendations (requires ANTHROPIC_API_KEY)")
     parser.add_argument("--no-ai", action="store_true", help="Skip AI recommendations even if cached")
-    parser.add_argument("--source", choices=["csv", "statements"], default="statements",
-                        help="Financial data source: statements (PDF statements, default) or csv (portfolio.csv)")
     args = parser.parse_args()
 
     folder = os.path.abspath(args.path)
@@ -1905,9 +1903,9 @@ def main():
             print(f"Passthrough adjustment ({desc}): −${adj:,.2f} in interest excluded")
 
     # Extract passive income from investment portfolio
-    passive_income = extract_passive_income(folder, source=args.source)
+    passive_income = extract_passive_income(folder)
     if passive_income:
-        print(f"Portfolio passive income ({args.source}): ${passive_income['annual_income']:,.2f}/year (${passive_income['monthly_income']:,.2f}/month) from {len(passive_income['accounts'])} accounts")
+        print(f"Portfolio passive income: ${passive_income['annual_income']:,.2f}/year (${passive_income['monthly_income']:,.2f}/month) from {len(passive_income['accounts'])} accounts")
         twr_result = compute_modified_dietz(passive_income)
         if twr_result:
             passive_income["twr"] = twr_result
