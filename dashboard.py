@@ -951,6 +951,7 @@ def generate_html(data: dict, ai_html: str | None = None,
         nwh_corporate = json.dumps([r["corporate"] for r in nw_history])
         nwh_property = json.dumps([r["property"] for r in nw_history])
         nwh_liabilities = json.dumps([r.get("liabilities", 0) for r in nw_history])
+        nwh_total = json.dumps([r["total"] for r in nw_history])
         # Summary: total change over period
         first_total = nw_history[0]["total"]
         last_total = nw_history[-1]["total"]
@@ -1041,6 +1042,18 @@ def generate_html(data: dict, ai_html: str | None = None,
                     pointRadius: 0,
                     borderWidth: 2,
                     stack: 'liabilities'
+                }},
+                {{
+                    label: 'Total Net Worth',
+                    data: {nwh_total},
+                    borderColor: '#333',
+                    backgroundColor: 'transparent',
+                    fill: false,
+                    tension: 0.3,
+                    pointRadius: 3,
+                    borderWidth: 2.5,
+                    stack: 'total',
+                    order: 0
                 }}
             ]
         }},
@@ -1079,11 +1092,19 @@ def generate_html(data: dict, ai_html: str | None = None,
         }}
     }});
     // Excl. Property checkbox
+    var nwhProperty = {nwh_property};
+    var nwhTotalOrig = {nwh_total};
     var nwhCb = document.getElementById('nwhExclProperty');
     if (nwhCb) {{
         nwhCb.addEventListener('change', function() {{
-            // Property is dataset index 3
+            // Property is dataset index 3, Total Net Worth is index 5
             nwhChart.data.datasets[3].hidden = this.checked;
+            var totalDs = nwhChart.data.datasets[5];
+            if (this.checked) {{
+                totalDs.data = nwhTotalOrig.map(function(v, i) {{ return v - nwhProperty[i]; }});
+            }} else {{
+                totalDs.data = nwhTotalOrig.slice();
+            }}
             nwhChart.update();
         }});
     }}"""
