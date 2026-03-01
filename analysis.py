@@ -570,7 +570,7 @@ Context: This dashboard covers a self-employed consultant pursuing financial sus
 DATA:
 {json.dumps(summary, indent=2)}
 
-Provide a MAXIMUM of 5 recommendations — no more than 5. Each should be specific, actionable, and reference actual numbers and merchant names from the data. Prioritize the most impactful insights from:
+Provide 5 to 10 recommendations. Each must be <= 80 words, specific, actionable, and reference actual numbers and merchant names from the data. Prioritize the most impactful insights from:
 - Sustainability gap (passive income vs burn rate — what would close the gap: higher yield, lower burn, or both)
 - Corporate bridge risk (revenue trend, client concentration — what happens if this bridge narrows)
 - Portfolio income observations (per-account yields, underperforming accounts, rebalancing opportunities, RRSP vs accessible allocation)
@@ -581,7 +581,7 @@ Provide a MAXIMUM of 5 recommendations — no more than 5. Each should be specif
 - Subscription cost-saving actions (price increases to negotiate, services to cancel/downgrade)
 - Spending pattern optimizations (consolidation, alternatives)
 
-Format your response in clean HTML as a single <ol> list with at most 5 <li> items. Use <strong> for emphasis on merchant names and dollar amounts. Be concise — one short paragraph per recommendation.
+Format your response in clean HTML as a single <ol> list with 5–10 <li> items. Use <strong> for emphasis on merchant names and dollar amounts. Each recommendation must be <= 80 words.
 
 IMPORTANT: On each <li>, include a data-sections attribute containing a comma-separated list of dashboard section IDs that the recommendation relates to. Use ONLY these IDs:
 - subscriptions — Subscription Audit
