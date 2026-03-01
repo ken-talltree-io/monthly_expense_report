@@ -2134,7 +2134,7 @@ class TestExtractPassiveIncome:
         import csv as csv_mod
         with open(tmp_path / "portfolio.csv", "w", newline="") as f:
             w = csv_mod.writer(f)
-            w.writerow(["Account", "Asset Type", "Acct Suffix", "Investment start date"])
+            w.writerow(["Account", "Brokerage", "Asset Type", "Acct Suffix", "Investment start date"])
             for r in rows:
                 w.writerow(r)
 
@@ -2153,7 +2153,7 @@ class TestExtractPassiveIncome:
             }
         }
         self._write_portfolio_csv(tmp_path, [
-            ("Ken TFSA", "TFSA", "WK1234CAD", ""),
+            ("Ken TFSA", "WS", "TFSA", "WK1234CAD", ""),
         ])
         result = extract_passive_income(str(tmp_path))
         assert result is not None
@@ -2163,6 +2163,7 @@ class TestExtractPassiveIncome:
         assert acct["return_source"] == "performance report"
         assert acct["income_annual"] == 1200.0
         assert acct["income_source"] == "dividends"
+        assert acct["brokerage"] == "WS"
 
     @patch("income.parse_statement_balances")
     def test_statement_mode_growth_suppressed_for_estimated(self, mock_stmts, tmp_path):
@@ -2179,7 +2180,7 @@ class TestExtractPassiveIncome:
             }
         }
         self._write_portfolio_csv(tmp_path, [
-            ("ETF Income", "Non-reg", "HQ1234CAD", ""),
+            ("ETF Income", "WS", "Non-reg", "HQ1234CAD", ""),
         ])
         result = extract_passive_income(str(tmp_path))
         acct = result["accounts"][0]
@@ -2200,7 +2201,7 @@ class TestExtractPassiveIncome:
             }
         }
         self._write_portfolio_csv(tmp_path, [
-            ("Managed", "TFSA", "WK5678CAD", ""),
+            ("Managed", "WS", "TFSA", "WK5678CAD", ""),
         ])
         result = extract_passive_income(str(tmp_path))
         acct = result["accounts"][0]
@@ -2229,7 +2230,7 @@ class TestExtractPassiveIncome:
             }
         }
         self._write_portfolio_csv(tmp_path, [
-            ("Corp Savings", "Non-reg", "6905CAD", ""),
+            ("Corp Savings", "WS", "Non-reg", "6905CAD", ""),
         ])
         result = extract_passive_income(str(tmp_path))
         assert result is not None
@@ -2259,8 +2260,8 @@ class TestExtractPassiveIncome:
             },
         }
         self._write_portfolio_csv(tmp_path, [
-            ("Tall Tree", "Corporate", "WK61NR", ""),
-            ("1829 East 2nd", "Property", "6113", ""),
+            ("Tall Tree", "WS", "Corporate", "WK61NR", ""),
+            ("1829 East 2nd", "Vancouver", "Property", "6113", ""),
         ])
         result = extract_passive_income(str(tmp_path))
         assert result is not None

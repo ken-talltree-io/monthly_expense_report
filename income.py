@@ -94,6 +94,7 @@ def extract_passive_income(folder: str) -> dict | None:
         header = next(reader)
         h = [c.strip().lower().replace("\n", " ") for c in header]
         col_account = 0
+        col_brokerage = next((i for i, c in enumerate(h) if "brokerage" in c), None)
         col_type = next((i for i, c in enumerate(h) if "asset" in c or c == "type"), 1)
         col_start_date = next((i for i, c in enumerate(h) if "start date" in c), None)
         col_suffix = next((i for i, c in enumerate(h) if "suffix" in c), None)
@@ -167,8 +168,11 @@ def extract_passive_income(folder: str) -> dict | None:
             else:
                 growth_annual = 0.0
 
-            # Derive brokerage from statement source (e.g. "Wealthsimple statement" → "Wealthsimple")
-            if stmt:
+            # Brokerage from CSV, falling back to statement source
+            csv_brokerage = row[col_brokerage].strip().replace("\n", " ") if col_brokerage is not None and col_brokerage < len(row) else ""
+            if csv_brokerage:
+                brokerage = csv_brokerage
+            elif stmt:
                 brokerage = stmt["source"].replace(" statement", "")
             else:
                 brokerage = ""
