@@ -1351,10 +1351,16 @@ def generate_html(data: dict, ai_html: str | None = None,
             return (f"<td style='text-align:right;font-style:italic'>{val}"
                     f"<br><span style='font-size:0.75em;color:#e67e22'>csv</span></td>")
 
-    def return_cell(a: dict) -> str:
-        """Render a return % <td> with source annotation."""
+    def return_cell(a: dict, has_twr: bool = False) -> str:
+        """Render a return % <td> with source annotation.
+
+        When has_twr is True and the source is 'estimated', suppress the
+        estimated return in favour of the TWR column.
+        """
         pct = a.get("return_pct", 0)
         src = a.get("return_source", "")
+        if has_twr and src == "estimated":
+            return "<td style='text-align:right;color:var(--muted)'>—</td>"
         if not src and pct == 0:
             return "<td style='text-align:right;color:var(--muted)'>—</td>"
         if src == "csv":
@@ -1425,10 +1431,11 @@ def generate_html(data: dict, ai_html: str | None = None,
 
         acc_rows = ""
         for a in acc_sorted:
+            has_twr = a["account"] in twr_by_account
             acc_rows += (
                 f"<tr><td>{a['account']}</td><td>{a.get('brokerage','')}</td><td>{a['type']}</td>"
                 f"{balance_cell(a)}"
-                f"{return_cell(a)}"
+                f"{return_cell(a, has_twr=has_twr)}"
                 f"{income_cell(a)}"
                 f"{growth_cell(a)}"
                 f"{twr_cell(a['account'])}</tr>"
@@ -1444,10 +1451,11 @@ def generate_html(data: dict, ai_html: str | None = None,
                                  reverse=True)
             reg_rows = ""
             for a in reg_sorted:
+                has_twr = a["account"] in twr_by_account
                 reg_rows += (
                     f"<tr><td>{a['account']}</td><td>{a.get('brokerage','')}</td><td>{a['type']}</td>"
                     f"{balance_cell(a)}"
-                    f"{return_cell(a)}"
+                    f"{return_cell(a, has_twr=has_twr)}"
                     f"{income_cell(a)}"
                     f"{growth_cell(a)}"
                     f"{twr_cell(a['account'])}</tr>"
@@ -1592,10 +1600,11 @@ h2 {{ font-size: 1.3em; margin-bottom: 15px; color: var(--accent); border-bottom
 .month-detail[open] summary {{ border-radius: 8px 8px 0 0; }}
 .month-detail .data-table {{ border: 1px solid var(--border); border-top: none; }}
 .ai-recommendations {{ line-height: 1.6; }}
-.ai-recommendations ol {{ list-style: none; counter-reset: rec; padding: 0; margin: 0; }}
-.ai-recommendations li {{ counter-increment: rec; background: var(--bg); border-radius: 10px; padding: 16px 18px 16px 52px; margin-bottom: 12px; position: relative; border: 1px solid var(--border); }}
-.ai-recommendations li::before {{ content: counter(rec); position: absolute; left: 16px; top: 16px; width: 26px; height: 26px; background: var(--accent); color: #fff; border-radius: 50%; font-size: 0.82em; font-weight: 700; display: flex; align-items: center; justify-content: center; }}
-.ai-recommendations li:last-child {{ margin-bottom: 0; }}
+.ai-recommendations table {{ width: 100%; border-collapse: collapse; }}
+.ai-recommendations th {{ text-align: left; padding: 10px 14px; border-bottom: 2px solid var(--border); font-size: 0.85em; color: var(--muted); }}
+.ai-recommendations td {{ padding: 12px 14px; border-bottom: 1px solid var(--border); vertical-align: top; }}
+.ai-recommendations td:first-child {{ width: 2em; text-align: center; font-weight: 700; color: var(--accent); }}
+.ai-recommendations td:last-child {{ width: 20%; font-size: 0.9em; }}
 .ai-badge {{ font-size: 0.65em; background: #f39c12; color: #fff; padding: 2px 8px; border-radius: 10px; margin-left: 8px; cursor: pointer; vertical-align: middle; text-decoration: none; }}
 .ai-badge:hover {{ background: #e67e22; }}
 canvas {{ max-width: 100%; }}
@@ -1752,11 +1761,11 @@ document.addEventListener('DOMContentLoaded', function() {{
 </script>
 <script>
 document.addEventListener('DOMContentLoaded', function() {{
-    var items = document.querySelectorAll('.ai-recommendations li[data-sections]');
-    items.forEach(function(li, idx) {{
+    var items = document.querySelectorAll('.ai-recommendations tr[data-sections]');
+    items.forEach(function(tr, idx) {{
         var tipNum = idx + 1;
-        var sections = li.getAttribute('data-sections').split(',');
-        li.id = 'ai-tip-' + tipNum;
+        var sections = tr.getAttribute('data-sections').split(',');
+        tr.id = 'ai-tip-' + tipNum;
         sections.forEach(function(id) {{
             id = id.trim();
             var section = document.getElementById(id);
@@ -1772,9 +1781,9 @@ document.addEventListener('DOMContentLoaded', function() {{
                 var aiBtn = document.querySelector('.tab-nav button[data-tab="tab-ai"]');
                 if (aiBtn) aiBtn.click();
                 setTimeout(function() {{
-                    li.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
-                    li.style.outline = '2px solid #f39c12';
-                    setTimeout(function() {{ li.style.outline = ''; }}, 2000);
+                    tr.scrollIntoView({{ behavior: 'smooth', block: 'center' }});
+                    tr.style.outline = '2px solid #f39c12';
+                    setTimeout(function() {{ tr.style.outline = ''; }}, 2000);
                 }}, 100);
             }});
             h2.appendChild(badge);

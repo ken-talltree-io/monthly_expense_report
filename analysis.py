@@ -581,9 +581,9 @@ Provide 5 to 10 recommendations. Each must be <= 80 words, specific, actionable,
 - Subscription cost-saving actions (price increases to negotiate, services to cancel/downgrade)
 - Spending pattern optimizations (consolidation, alternatives)
 
-Format your response in clean HTML as a single <ol> list with 5–10 <li> items. Use <strong> for emphasis on merchant names and dollar amounts. Each recommendation must be <= 80 words.
+Respond with ONLY a raw HTML <table> — no markdown, no code fences, no explanation before or after. Columns: #, Recommendation, Expected Impact. Rank recommendations by expected impact, highest first. Use <strong> for emphasis on merchant names and dollar amounts. Each recommendation cell must be <= 80 words. The Expected Impact column should quantify the benefit where possible (e.g. "$X/yr savings", "+$X/yr income", "reduce risk").
 
-IMPORTANT: On each <li>, include a data-sections attribute containing a comma-separated list of dashboard section IDs that the recommendation relates to. Use ONLY these IDs:
+IMPORTANT: On each <tr> (except the header), include a data-sections attribute containing a comma-separated list of dashboard section IDs that the recommendation relates to. Use ONLY these IDs:
 - subscriptions — Subscription Audit
 - categories — Category Heatmap / spending categories
 - fixed-discretionary — Fixed vs Discretionary costs
@@ -594,7 +594,7 @@ IMPORTANT: On each <li>, include a data-sections attribute containing a comma-se
 - bank-interest — Bank Interest
 - debt-freedom — Debt Freedom
 
-Example: <li data-sections="subscriptions,categories">Cancel Netflix...</li>"""
+Example: <tr data-sections="subscriptions,categories"><td>1</td><td>Cancel Netflix...</td><td>$200/yr savings</td></tr>"""
 
     payload = json.dumps({
         "model": "claude-sonnet-4-6",
@@ -618,7 +618,13 @@ Example: <li data-sections="subscriptions,categories">Cancel Netflix...</li>"""
         ctx = ssl.create_default_context()
         with urlopen(req, context=ctx, timeout=60) as resp:
             body = json.loads(resp.read().decode("utf-8"))
-            return body["content"][0]["text"]
+            html = body["content"][0]["text"]
+            # Strip markdown code fences / preamble the model may add
+            if "<table" in html:
+                html = html[html.index("<table"):]
+            if "</table>" in html:
+                html = html[:html.rindex("</table>") + len("</table>")]
+            return html
     except HTTPError as e:
         error_body = e.read().decode("utf-8") if e.fp else ""
         print(f"API error ({e.code}): {error_body}")

@@ -25,7 +25,11 @@ from config import (
     ANOMALY_NEW_MERCHANT_MIN,
 )
 from analysis import analyze, detect_anomalies, get_ai_recommendations
-from income import compute_net_worth_history, load_passthrough, load_liabilities, extract_bank_interest, extract_transfers
+from income import (
+    compute_net_worth_history, compute_modified_dietz, extract_passive_income,
+    load_passthrough, load_liabilities, extract_bank_interest, extract_transfers,
+)
+from parsers import parse_csvs, parse_statement_balances
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────────
@@ -1507,3 +1511,767 @@ class TestLiabilitiesNetWorth:
         for row in result:
             assert row["liabilities"] == 0.0
             assert row["total"] == 500000.0
+
+
+# ── CSV Parsing (parsers.parse_csvs) ─────────────────────────────────────────
+
+
+class TestParseCsvs:
+    """Tests for parsers.parse_csvs — credit + debit CSV reading."""
+
+    def _write_credit_csv(self, tmp_path, rows, subdir="Visa"):
+        """Write a credit card CSV and return folder path."""
+        d = tmp_path / "transactions" / "personal" / subdir
+        d.mkdir(parents=True)
+        csv_path = d / "credit.csv"
+        lines = ["transaction_date,details,amount,type\n"]
+        for r in rows:
+            lines.append(f"{r[0]},{r[1]},{r[2]},{r[3]}\n")
+        csv_path.write_text("".join(lines))
+        return str(tmp_path)
+
+    def _write_debit_csv(self, tmp_path, rows, subdir="Chequing"):
+        """Write a debit card CSV and return folder path."""
+        d = tmp_path / "transactions" / "personal" / subdir
+        d.mkdir(parents=True)
+        csv_path = d / "debit.csv"
+        lines = ["date,transaction,description,amount,balance,currency\n"]
+        for r in rows:
+            lines.append(f"{r[0]},{r[1]},{r[2]},{r[3]},1000.00,CAD\n")
+        csv_path.write_text("".join(lines))
+        return str(tmp_path)
+
+    def test_credit_card_purchase(self, tmp_path):
+        """Credit card purchases are parsed with amount, merchant, and date."""
+        folder = self._write_credit_csv(tmp_path, [
+            ("2025-07-15", "GROCERY STORE", "42.50", "Purchase"),
+        ])
+        txns, payoffs = parse_csvs(folder)
+        assert len(txns) == 1
+        assert txns[0]["amount"] == 42.50
+        assert txns[0]["source"] == "credit"
+        assert txns[0]["month"] == "2025-07"
+
+    def test_credit_card_payment_excluded(self, tmp_path):
+        """Credit card payments (negative or Payment type) are excluded."""
+        folder = self._write_credit_csv(tmp_path, [
+            ("2025-07-15", "GROCERY STORE", "-100.00", "Purchase"),
+            ("2025-07-20", "PAYMENT", "500.00", "Payment"),
+            ("2025-07-25", "RESTAURANT", "30.00", "Purchase"),
+        ])
+        txns, _ = parse_csvs(folder)
+        assert len(txns) == 1
+        assert txns[0]["amount"] == 30.00
+
+    def test_debit_spend(self, tmp_path):
+        """Debit SPEND transactions are parsed."""
+        folder = self._write_debit_csv(tmp_path, [
+            ("2025-08-01", "SPEND", "Coffee Shop Purchase", "-5.50"),
+        ])
+        txns, _ = parse_csvs(folder)
+        assert len(txns) == 1
+        assert txns[0]["amount"] == 5.50
+        assert txns[0]["source"] == "debit"
+
+    def test_debit_aft_out(self, tmp_path):
+        """Debit AFT_OUT (pre-authorized debits) are parsed as fixed costs."""
+        folder = self._write_debit_csv(tmp_path, [
+            ("2025-08-01", "AFT_OUT", "Pre-authorized Debit to INSURANCE CO", "-150.00"),
+        ])
+        txns, _ = parse_csvs(folder)
+        assert len(txns) == 1
+        assert txns[0]["amount"] == 150.00
+        assert txns[0]["fixed_cost"] is True
+
+    def test_debit_obp_out(self, tmp_path):
+        """Debit OBP_OUT (online bill payments) are parsed as fixed costs."""
+        folder = self._write_debit_csv(tmp_path, [
+            ("2025-08-01", "OBP_OUT", "Online bill payment for HYDRO", "-200.00"),
+        ])
+        txns, _ = parse_csvs(folder)
+        assert len(txns) == 1
+        assert txns[0]["amount"] == 200.00
+        assert txns[0]["fixed_cost"] is True
+
+    def test_debit_etransfer(self, tmp_path):
+        """Debit E_TRFOUT (e-Transfers) are parsed."""
+        folder = self._write_debit_csv(tmp_path, [
+            ("2025-08-01", "E_TRFOUT", "Sent to John", "-50.00"),
+        ])
+        txns, _ = parse_csvs(folder)
+        assert len(txns) == 1
+        assert txns[0]["merchant"] == "Interac e-Transfer"
+
+    def test_debt_payoff_excluded(self, tmp_path):
+        """AFT_OUT exceeding debt threshold is excluded and tracked as payoff."""
+        from config import DEBT_PAYOFF_THRESHOLDS
+        if not DEBT_PAYOFF_THRESHOLDS:
+            pytest.skip("No DEBT_PAYOFF_THRESHOLDS configured")
+        merchant = next(iter(DEBT_PAYOFF_THRESHOLDS))
+        threshold = DEBT_PAYOFF_THRESHOLDS[merchant]
+        folder = self._write_debit_csv(tmp_path, [
+            ("2025-08-01", "AFT_OUT", f"Pre-authorized Debit to {merchant}", f"-{threshold + 1000}"),
+        ])
+        txns, payoffs = parse_csvs(folder)
+        assert len(txns) == 0
+        assert len(payoffs) == 1
+        assert payoffs[0]["amount"] == threshold + 1000
+
+    def test_business_merchants_excluded(self, tmp_path):
+        """Transactions for business merchants are excluded from personal spending."""
+        from config import BUSINESS_MERCHANTS
+        if not BUSINESS_MERCHANTS:
+            pytest.skip("No BUSINESS_MERCHANTS configured")
+        biz = next(iter(BUSINESS_MERCHANTS))
+        folder = self._write_credit_csv(tmp_path, [
+            ("2025-07-15", biz, "100.00", "Purchase"),
+        ])
+        txns, _ = parse_csvs(folder)
+        assert len(txns) == 0
+
+
+# ── Statement Balance Parsing (parsers.parse_statement_balances) ─────────────
+
+
+class TestParseStatementBalances:
+    """Tests for parsers.parse_statement_balances — PDF statement extraction."""
+
+    def test_no_statements_dir(self, tmp_path):
+        """Returns empty dict when statements/ directory doesn't exist."""
+        result = parse_statement_balances(str(tmp_path))
+        assert result == {}
+
+    @patch("parsers.subprocess.run")
+    def test_pdftotext_not_available(self, mock_run, tmp_path):
+        """Returns empty dict when pdftotext is not installed."""
+        (tmp_path / "statements").mkdir()
+        mock_run.side_effect = FileNotFoundError
+        result = parse_statement_balances(str(tmp_path))
+        assert result == {}
+
+    @patch("parsers.subprocess.run")
+    def test_wealthsimple_statement(self, mock_run, tmp_path):
+        """Parses Wealthsimple monthly statement for balance and book cost."""
+        ws_dir = tmp_path / "statements" / "personal" / "Wealthsimple"
+        ws_dir.mkdir(parents=True)
+        (ws_dir / "HQ1234CAD_person-abc_2025-07_v_0.pdf").touch()
+
+        pdf_text = (
+            "2025-07-01 - 2025-07-31\n"
+            "Total Portfolio  $10,500.00  100.00  $10,000.00  100.00\n"
+        )
+
+        def fake_run(cmd, **kwargs):
+            m = MagicMock()
+            if cmd[0] == "pdftotext" and cmd[1] == "-layout":
+                m.stdout = pdf_text
+                m.returncode = 0
+            elif cmd[0] == "pdftotext" and cmd[1] == "-v":
+                m.returncode = 0
+            return m
+
+        mock_run.side_effect = fake_run
+        result = parse_statement_balances(str(tmp_path))
+        assert "HQ1234CAD" in result
+        assert result["HQ1234CAD"]["balance"] == 10500.00
+        assert result["HQ1234CAD"]["source"] == "Wealthsimple statement"
+        assert result["HQ1234CAD"]["return_pct"] == pytest.approx(5.0, abs=0.01)
+        assert result["HQ1234CAD"]["return_source"] == "estimated"
+
+    @patch("parsers.subprocess.run")
+    def test_wealthsimple_performance_pdf(self, mock_run, tmp_path):
+        """Performance PDF overrides return rate with 1-year money-weighted return."""
+        ws_dir = tmp_path / "statements" / "personal" / "Wealthsimple"
+        ws_dir.mkdir(parents=True)
+        (ws_dir / "WK9999CAD_person-abc_2025-07_v_0.pdf").touch()
+        (ws_dir / "Performance_WK9999CAD_person-abc_2025-07_v_0.pdf").touch()
+
+        stmt_text = (
+            "2025-07-01 - 2025-07-31\n"
+            "Total Portfolio  $10,500.00  100.00  $10,000.00  100.00\n"
+        )
+        perf_text = (
+            "Money-weighted Return Rates\n"
+            "    Current period    1 year    3 years    5 years    10 years    Since inception\n"
+            "        3.90%        12.78%     14.39%      0.00%       0.00%         8.48%\n"
+        )
+
+        def fake_run(cmd, **kwargs):
+            m = MagicMock()
+            if cmd[0] == "pdftotext" and cmd[1] == "-v":
+                m.returncode = 0
+                return m
+            m.returncode = 0
+            path = cmd[2] if len(cmd) > 2 else ""
+            m.stdout = perf_text if "Performance_" in str(path) else stmt_text
+            return m
+
+        mock_run.side_effect = fake_run
+        result = parse_statement_balances(str(tmp_path))
+        assert result["WK9999CAD"]["return_pct"] == 12.78
+        assert result["WK9999CAD"]["return_source"] == "performance report"
+
+    @patch("parsers.subprocess.run")
+    def test_wealthsimple_performance_fallback_since_inception(self, mock_run, tmp_path):
+        """Falls back to since-inception when 1-year is 0.00%."""
+        ws_dir = tmp_path / "statements" / "personal" / "Wealthsimple"
+        ws_dir.mkdir(parents=True)
+        (ws_dir / "WK8888CAD_person-abc_2025-07_v_0.pdf").touch()
+        (ws_dir / "Performance_WK8888CAD_person-abc_2025-07_v_0.pdf").touch()
+
+        stmt_text = (
+            "2025-07-01 - 2025-07-31\n"
+            "Total Portfolio  $10,500.00  100.00  $10,000.00  100.00\n"
+        )
+        perf_text = (
+            "Money-weighted Return Rates\n"
+            "    Current period    1 year    3 years    5 years    10 years    Since inception\n"
+            "        3.90%        0.00%     0.00%      0.00%       0.00%         8.48%\n"
+        )
+
+        def fake_run(cmd, **kwargs):
+            m = MagicMock()
+            if cmd[0] == "pdftotext" and cmd[1] == "-v":
+                m.returncode = 0
+                return m
+            m.returncode = 0
+            path = cmd[2] if len(cmd) > 2 else ""
+            m.stdout = perf_text if "Performance_" in str(path) else stmt_text
+            return m
+
+        mock_run.side_effect = fake_run
+        result = parse_statement_balances(str(tmp_path))
+        assert result["WK8888CAD"]["return_pct"] == 8.48
+        assert result["WK8888CAD"]["return_source"] == "performance report"
+
+    @patch("parsers.subprocess.run")
+    def test_wealthsimple_dividends(self, mock_run, tmp_path):
+        """Parses dividends and interest from monthly statements."""
+        ws_dir = tmp_path / "statements" / "personal" / "Wealthsimple"
+        ws_dir.mkdir(parents=True)
+        # Two months of statements
+        for mo in ["2025-06", "2025-07"]:
+            (ws_dir / f"HQ5678CAD_person-abc_{mo}_v_0.pdf").touch()
+
+        pdf_text = (
+            "2025-07-01 - 2025-07-31\n"
+            "Total Portfolio  $50,000.00  100.00  $48,000.00  100.00\n"
+            "Dividends  $150.00\n"
+            "Interest Earned  $25.00\n"
+        )
+
+        def fake_run(cmd, **kwargs):
+            m = MagicMock()
+            if cmd[0] == "pdftotext" and cmd[1] == "-v":
+                m.returncode = 0
+                return m
+            m.returncode = 0
+            m.stdout = pdf_text
+            return m
+
+        mock_run.side_effect = fake_run
+        result = parse_statement_balances(str(tmp_path))
+        assert "HQ5678CAD" in result
+        # 2 months of $175/mo → annualized = $350/2*12 = $2100
+        assert result["HQ5678CAD"]["dividends_annual"] == pytest.approx(2100.0)
+
+    @patch("parsers.subprocess.run")
+    def test_wealthsimple_usd_conversion(self, mock_run, tmp_path):
+        """USD accounts are converted to CAD using statement exchange rate."""
+        ws_dir = tmp_path / "statements" / "personal" / "Wealthsimple"
+        ws_dir.mkdir(parents=True)
+        (ws_dir / "WK1234USD_person-abc_2025-07_v_0.pdf").touch()
+
+        pdf_text = (
+            "2025-07-01 - 2025-07-31\n"
+            "Total Portfolio  $1,000.00  100.00  $900.00  100.00\n"
+            "$1 USD = $1.35 CAD\n"
+        )
+
+        def fake_run(cmd, **kwargs):
+            m = MagicMock()
+            if cmd[0] == "pdftotext" and cmd[1] == "-v":
+                m.returncode = 0
+                return m
+            m.returncode = 0
+            m.stdout = pdf_text
+            return m
+
+        mock_run.side_effect = fake_run
+        result = parse_statement_balances(str(tmp_path))
+        assert "WK1234USD" in result
+        assert result["WK1234USD"]["balance"] == pytest.approx(1350.0)
+
+    @patch("parsers.subprocess.run")
+    def test_wealthsimple_crm2_skipped(self, mock_run, tmp_path):
+        """CRM2 annual reports are skipped."""
+        ws_dir = tmp_path / "statements" / "personal" / "Wealthsimple"
+        ws_dir.mkdir(parents=True)
+        (ws_dir / "HQ1234CAD_CRM2_2025_report.pdf").touch()
+
+        def fake_run(cmd, **kwargs):
+            m = MagicMock()
+            m.returncode = 0
+            m.stdout = ""
+            return m
+
+        mock_run.side_effect = fake_run
+        result = parse_statement_balances(str(tmp_path))
+        assert "HQ1234CAD" not in result
+
+    @patch("parsers.subprocess.run")
+    def test_scotiabank_personal(self, mock_run, tmp_path):
+        """Parses Scotiabank personal chequing statement."""
+        sc_dir = tmp_path / "statements" / "personal" / "Scotiabank Chequing"
+        sc_dir.mkdir(parents=True)
+        (sc_dir / "February 2026 e-statement.pdf").touch()
+
+        pdf_text = (
+            "Your account number:\n"
+            "11080 00070 21\n"
+            "Closing Balance on February 17, 2026  $2,382.71\n"
+        )
+
+        def fake_run(cmd, **kwargs):
+            m = MagicMock()
+            if cmd[0] == "pdftotext" and cmd[1] == "-v":
+                m.returncode = 0
+                return m
+            m.returncode = 0
+            m.stdout = pdf_text
+            return m
+
+        mock_run.side_effect = fake_run
+        result = parse_statement_balances(str(tmp_path))
+        assert "110800007021" in result
+        assert result["110800007021"]["balance"] == 2382.71
+        assert result["110800007021"]["source"] == "Scotiabank statement"
+
+    @patch("parsers.subprocess.run")
+    def test_scotiabank_ken_personal(self, mock_run, tmp_path):
+        """Parses Scotiabank Ken Personal statements with abbreviated month names."""
+        sc_dir = tmp_path / "statements" / "personal" / "Scotiabank Ken Personal"
+        sc_dir.mkdir(parents=True)
+        (sc_dir / "Scotiabank - Ken Personal - Jul 2025.pdf").touch()
+
+        pdf_text = (
+            "Your account number:\n"
+            "76018 10653 27\n"
+            "Closing Balance on July 31, 2025  $0.00\n"
+        )
+
+        def fake_run(cmd, **kwargs):
+            m = MagicMock()
+            if cmd[0] == "pdftotext" and cmd[1] == "-v":
+                m.returncode = 0
+                return m
+            m.returncode = 0
+            m.stdout = pdf_text
+            return m
+
+        mock_run.side_effect = fake_run
+        result = parse_statement_balances(str(tmp_path))
+        assert "760181065327" in result
+        assert result["760181065327"]["balance"] == 0.0
+
+    @patch("parsers.subprocess.run")
+    def test_scotiabank_corporate(self, mock_run, tmp_path):
+        """Parses Scotiabank corporate statement from transaction lines."""
+        sc_dir = tmp_path / "statements" / "corporate" / "Scotiabank Chequing"
+        sc_dir.mkdir(parents=True)
+        (sc_dir / "Tall Tree Technology - DebitCard - January 2026 e-statement.pdf").touch()
+
+        pdf_text = (
+            "Business Account  40360 01202 19  Dec 31 2025  Jan 30 2026\n"
+            "01/15/2026  DEPOSIT  1,000.00  0.00  8,274.25\n"
+        )
+
+        def fake_run(cmd, **kwargs):
+            m = MagicMock()
+            if cmd[0] == "pdftotext" and cmd[1] == "-v":
+                m.returncode = 0
+                return m
+            m.returncode = 0
+            m.stdout = pdf_text
+            return m
+
+        mock_run.side_effect = fake_run
+        result = parse_statement_balances(str(tmp_path))
+        assert "403600120219" in result
+        assert result["403600120219"]["balance"] == 8274.25
+        assert result["403600120219"]["date"] == "Jan 30 2026"
+
+    @patch("parsers.subprocess.run")
+    def test_bc_property_assessment(self, mock_run, tmp_path):
+        """Parses BC property assessments from sidecar CSV."""
+        bc_dir = tmp_path / "statements" / "personal" / "British Columbia"
+        bc_dir.mkdir(parents=True)
+        csv_path = bc_dir / "property_assessments.csv"
+        csv_path.write_text(
+            "Address,Suffix,Assessed Value,Change,Year\n"
+            '1829 East 2nd,6113,"$1,904,900.00",-5.00%,2026\n'
+            '1829 East 2nd,6113,"$2,005,158.00",-4.00%,2025\n'
+        )
+
+        def fake_run(cmd, **kwargs):
+            m = MagicMock()
+            m.returncode = 0
+            m.stdout = ""
+            return m
+
+        mock_run.side_effect = fake_run
+        result = parse_statement_balances(str(tmp_path))
+        assert "6113" in result
+        assert result["6113"]["balance"] == 1904900.0
+        assert result["6113"]["return_pct"] == -5.0
+        assert result["6113"]["return_source"] == "BC Assessment"
+
+    @patch("parsers.subprocess.run")
+    def test_steadyhand_quarterly(self, mock_run, tmp_path):
+        """Parses Steadyhand quarterly PDF for balance and returns."""
+        sh_dir = tmp_path / "statements" / "personal" / "Steadyhand"
+        sh_dir.mkdir(parents=True)
+        (sh_dir / "December 2025.pdf").touch()
+
+        pdf_text = (
+            "As of December 31, 2025\n"
+            "1055896  TFSA  Ken Britton  70,647.20\n\n"
+            "Account 1055896  TFSA\n"
+            "KEN BRITTON\n"
+            "Beginning Value                 69,197.82\n"
+            "Contributions                        0.00\n"
+            "Redemptions                          0.00\n"
+            "Gain/Loss                        1,449.38\n"
+            "Ending Value                  $ 70,647.20\n\n"
+            "Account Performance\n"
+            "Performance Period                Rate of return (%)\n"
+            "3 Months                                              2.1\n"
+            "1 Year                                                7.4\n\n"
+            "Transactions Throughout the Period\n"
+            "Distribution - Reinvested  12/15  250.00  15.00  16.67  1234.56\n"
+        )
+
+        def fake_run(cmd, **kwargs):
+            m = MagicMock()
+            if cmd[0] == "pdftotext" and cmd[1] == "-v":
+                m.returncode = 0
+                return m
+            m.returncode = 0
+            m.stdout = pdf_text
+            return m
+
+        mock_run.side_effect = fake_run
+        result = parse_statement_balances(str(tmp_path))
+        assert "1055896" in result
+        assert result["1055896"]["balance"] == 70647.20
+        assert result["1055896"]["return_pct"] == 7.4
+        assert result["1055896"]["dividends_annual"] == pytest.approx(1000.0)  # 250 * 4
+        assert result["1055896"]["source"] == "Steadyhand statement"
+
+    @patch("parsers.subprocess.run")
+    def test_steadyhand_beginning_value(self, mock_run, tmp_path):
+        """Beginning value from oldest PDF creates an extra balance history point."""
+        sh_dir = tmp_path / "statements" / "personal" / "Steadyhand"
+        sh_dir.mkdir(parents=True)
+        (sh_dir / "March 2025.pdf").touch()
+        (sh_dir / "June 2025.pdf").touch()
+
+        q1_text = (
+            "As of March 31, 2025\n"
+            "1055896  TFSA  Ken Britton  64,764.64\n\n"
+            "Account 1055896  TFSA\n"
+            "Beginning Value                 62,049.94\n"
+            "Contributions                    2,249.99\n"
+            "Redemptions                          0.00\n"
+        )
+        q2_text = (
+            "As of June 30, 2025\n"
+            "1055896  TFSA  Ken Britton  67,102.08\n\n"
+            "Account 1055896  TFSA\n"
+            "Beginning Value                 64,764.64\n"
+            "Contributions                    1,500.00\n"
+            "Redemptions                          0.00\n"
+        )
+
+        def fake_run(cmd, **kwargs):
+            m = MagicMock()
+            if cmd[0] == "pdftotext" and cmd[1] == "-v":
+                m.returncode = 0
+                return m
+            m.returncode = 0
+            path = str(cmd[2]) if len(cmd) > 2 else ""
+            m.stdout = q1_text if "March" in path else q2_text
+            return m
+
+        mock_run.side_effect = fake_run
+        result = parse_statement_balances(str(tmp_path))
+        hist = result["1055896"]["balance_history"]
+        # 3 points: beginning value (Dec 2024) + Q1 + Q2
+        assert len(hist) == 3
+        assert hist[0]["balance"] == 62049.94
+        assert hist[0]["deposits"] == 0.0  # beginning value has no flows
+        assert hist[1]["deposits"] == 2249.99
+        assert hist[2]["deposits"] == 1500.00
+
+
+# ── Modified Dietz Return Calculation ────────────────────────────────────────
+
+
+class TestModifiedDietz:
+    """Tests for income.compute_modified_dietz."""
+
+    def _make_passive(self, accounts):
+        return {"accounts": accounts, "registered_accounts": []}
+
+    def _acct(self, name, history):
+        return {"account": name, "balance_history": history}
+
+    def _hist(self, date, balance, deposits=0.0, withdrawals=0.0):
+        return {"date": date, "balance": balance,
+                "deposits": deposits, "withdrawals": withdrawals}
+
+    def test_simple_growth_no_flows(self):
+        """Pure growth with no deposits/withdrawals."""
+        acct = self._acct("Test", [
+            self._hist("2025-01-31", 10000),
+            self._hist("2025-02-28", 10100),
+            self._hist("2025-03-31", 10201),
+            self._hist("2025-04-30", 10303),
+        ])
+        result = compute_modified_dietz(self._make_passive([acct]))
+        assert result is not None
+        pa = result["per_account"][0]
+        ann = (1 + pa["monthly_return"]) ** 12 - 1
+        assert ann == pytest.approx(0.1268, abs=0.01)  # ~1%/mo compounded
+
+    def test_large_inflow_handled(self):
+        """Large deposit relative to starting balance doesn't distort return."""
+        acct = self._acct("Funded", [
+            self._hist("2025-01-31", 5000),
+            self._hist("2025-04-30", 255000, deposits=250000),
+            self._hist("2025-07-31", 257000),
+            self._hist("2025-10-31", 259000),
+        ])
+        result = compute_modified_dietz(self._make_passive([acct]))
+        pa = result["per_account"][0]
+        ann = (1 + pa["monthly_return"]) ** 12 - 1
+        # Should be a modest return, not inflated by the large deposit
+        assert ann < 0.10  # less than 10%
+
+    def test_withdrawal_handled(self):
+        """Withdrawals don't distort return calculation."""
+        acct = self._acct("Withdrawing", [
+            self._hist("2025-01-31", 100000),
+            self._hist("2025-04-30", 52000, withdrawals=50000),
+            self._hist("2025-07-31", 53000),
+            self._hist("2025-10-31", 54000),
+        ])
+        result = compute_modified_dietz(self._make_passive([acct]))
+        pa = result["per_account"][0]
+        ann = (1 + pa["monthly_return"]) ** 12 - 1
+        assert ann > 0  # positive return despite balance declining
+
+    def test_insufficient_data_returns_none(self):
+        """Returns None with fewer than 3 data points across all accounts."""
+        acct = self._acct("Short", [
+            self._hist("2025-01-31", 10000),
+            self._hist("2025-02-28", 10100),
+        ])
+        result = compute_modified_dietz(self._make_passive([acct]))
+        assert result is None
+
+    def test_weighted_average_across_accounts(self):
+        """Portfolio return is balance-weighted across accounts."""
+        big = self._acct("Big", [
+            self._hist("2025-01-31", 100000),
+            self._hist("2025-02-28", 101000),
+            self._hist("2025-03-31", 102000),
+            self._hist("2025-04-30", 103000),
+        ])
+        small = self._acct("Small", [
+            self._hist("2025-01-31", 1000),
+            self._hist("2025-02-28", 990),
+            self._hist("2025-03-31", 980),
+            self._hist("2025-04-30", 970),
+        ])
+        result = compute_modified_dietz(self._make_passive([big, small]))
+        # Portfolio should be positive (dominated by Big account)
+        assert result["annualized_rate"] > 0
+
+    def test_zero_balance_period_skipped(self):
+        """Periods where starting balance is zero are skipped."""
+        acct = self._acct("ZeroStart", [
+            self._hist("2025-01-31", 0),
+            self._hist("2025-02-28", 10000, deposits=10000),
+            self._hist("2025-03-31", 10100),
+            self._hist("2025-04-30", 10200),
+            self._hist("2025-05-31", 10300),
+        ])
+        result = compute_modified_dietz(self._make_passive([acct]))
+        assert result is not None
+        assert result["data_points"] == 3  # first period skipped
+
+    def test_date_range_reported(self):
+        """Result includes correct date range."""
+        acct = self._acct("Dated", [
+            self._hist("2025-01-31", 10000),
+            self._hist("2025-02-28", 10100),
+            self._hist("2025-03-31", 10200),
+            self._hist("2025-04-30", 10300),
+        ])
+        result = compute_modified_dietz(self._make_passive([acct]))
+        assert result["date_range"][0] == "2025-01-31"
+        assert result["date_range"][1] == "2025-04-30"
+
+
+# ── Extract Passive Income ───────────────────────────────────────────────────
+
+
+class TestExtractPassiveIncome:
+    """Tests for income.extract_passive_income with mocked statements."""
+
+    def _write_portfolio_csv(self, tmp_path, rows):
+        csv_path = tmp_path / "portfolio.csv"
+        import csv as csv_mod
+        with open(tmp_path / "portfolio.csv", "w", newline="") as f:
+            w = csv_mod.writer(f)
+            w.writerow(["Account", "Brokerage", "Asset Type", "Suffix",
+                         "Total Value (CAD)", "All Time Return", "Yield",
+                         "Strategy", "Start Date"])
+            for r in rows:
+                w.writerow(r)
+
+    @patch("income.parse_statement_balances")
+    def test_csv_mode_basic(self, mock_stmts, tmp_path):
+        """CSV mode reads balances and returns from portfolio.csv."""
+        mock_stmts.return_value = {}
+        self._write_portfolio_csv(tmp_path, [
+            ("Ken TFSA", "WS", "TFSA", "WK1234CAD", "$50,000.00", "5.0%", "3.0%", "Growth", "Jan 1, 2020"),
+        ])
+        result = extract_passive_income(str(tmp_path), source="csv")
+        assert result is not None
+        assert len(result["accounts"]) == 1
+        assert result["accounts"][0]["value"] == 50000.0
+        assert result["accounts"][0]["return_pct"] == 5.0
+        assert result["accounts"][0]["income_annual"] == pytest.approx(1500.0)  # 50k * 3%
+
+    @patch("income.parse_statement_balances")
+    def test_csv_mode_rrsp_goes_to_registered(self, mock_stmts, tmp_path):
+        """RRSP accounts are routed to registered_accounts."""
+        mock_stmts.return_value = {}
+        self._write_portfolio_csv(tmp_path, [
+            ("Ken RRSP", "SH", "RRSP", "1055904", "$500,000.00", "11.4%", "", "Growth", "Jan 1, 2015"),
+        ])
+        result = extract_passive_income(str(tmp_path), source="csv")
+        assert len(result["registered_accounts"]) == 1
+        assert result["registered_accounts"][0]["type"] == "RRSP"
+
+    @patch("income.parse_statement_balances")
+    def test_statement_mode_uses_stmt_balance(self, mock_stmts, tmp_path):
+        """Statement mode uses balance from parsed statements, not CSV."""
+        mock_stmts.return_value = {
+            "WK1234CAD": {
+                "balance": 55000.0,
+                "date": "2025-07-31",
+                "source": "Wealthsimple statement",
+                "return_pct": 8.5,
+                "return_source": "performance report",
+                "dividends_annual": 1200.0,
+                "balance_history": [],
+            }
+        }
+        self._write_portfolio_csv(tmp_path, [
+            ("Ken TFSA", "WS", "TFSA", "WK1234CAD", "$50,000.00", "5.0%", "3.0%", "Growth", ""),
+        ])
+        result = extract_passive_income(str(tmp_path), source="statements")
+        assert result is not None
+        acct = result["accounts"][0]
+        assert acct["value"] == 55000.0  # from statement, not CSV
+        assert acct["return_pct"] == 8.5
+        assert acct["return_source"] == "performance report"
+        assert acct["income_annual"] == 1200.0
+        assert acct["income_source"] == "dividends"
+
+    @patch("income.parse_statement_balances")
+    def test_statement_mode_growth_suppressed_for_estimated(self, mock_stmts, tmp_path):
+        """Growth is suppressed when return_source is 'estimated'."""
+        mock_stmts.return_value = {
+            "HQ1234CAD": {
+                "balance": 100000.0,
+                "date": "2025-07-31",
+                "source": "Wealthsimple statement",
+                "return_pct": 2.0,
+                "return_source": "estimated",
+                "dividends_annual": 5000.0,
+                "balance_history": [],
+            }
+        }
+        self._write_portfolio_csv(tmp_path, [
+            ("ETF Income", "WS", "Non-reg", "HQ1234CAD", "$100,000.00", "", "", "", ""),
+        ])
+        result = extract_passive_income(str(tmp_path), source="statements")
+        acct = result["accounts"][0]
+        assert acct["growth_annual"] == 0.0  # suppressed for estimated
+
+    @patch("income.parse_statement_balances")
+    def test_statement_mode_growth_computed_for_performance_report(self, mock_stmts, tmp_path):
+        """Growth is computed when return_source is authoritative."""
+        mock_stmts.return_value = {
+            "WK5678CAD": {
+                "balance": 100000.0,
+                "date": "2025-07-31",
+                "source": "Wealthsimple statement",
+                "return_pct": 10.0,
+                "return_source": "performance report",
+                "dividends_annual": 3000.0,
+                "balance_history": [],
+            }
+        }
+        self._write_portfolio_csv(tmp_path, [
+            ("Managed", "WS", "TFSA", "WK5678CAD", "$100,000.00", "", "", "", ""),
+        ])
+        result = extract_passive_income(str(tmp_path), source="statements")
+        acct = result["accounts"][0]
+        # total_return = 100k * 10% = 10k; growth = 10k - 3k = 7k
+        assert acct["growth_annual"] == pytest.approx(7000.0)
+
+    @patch("income.parse_statement_balances")
+    def test_no_portfolio_csv_returns_none(self, mock_stmts, tmp_path):
+        """Returns None when portfolio.csv doesn't exist."""
+        mock_stmts.return_value = {}
+        result = extract_passive_income(str(tmp_path), source="csv")
+        assert result is None
+
+    @patch("income.parse_statement_balances")
+    def test_suffix_substring_matching(self, mock_stmts, tmp_path):
+        """Statement keys ending with CSV suffix are matched."""
+        mock_stmts.return_value = {
+            "HQ8KF6905CAD": {
+                "balance": 20000.0,
+                "date": "2025-07-31",
+                "source": "Wealthsimple statement",
+                "return_pct": 3.0,
+                "return_source": "estimated",
+                "dividends_annual": 500.0,
+                "balance_history": [],
+            }
+        }
+        self._write_portfolio_csv(tmp_path, [
+            ("Corp Savings", "WS", "Non-reg", "6905CAD", "$20,000.00", "", "", "", ""),
+        ])
+        result = extract_passive_income(str(tmp_path), source="statements")
+        assert result is not None
+        assert result["accounts"][0]["value"] == 20000.0
+
+    @patch("income.parse_statement_balances")
+    def test_corporate_and_property_accounts(self, mock_stmts, tmp_path):
+        """Corporate and Property accounts are routed correctly."""
+        mock_stmts.return_value = {}
+        self._write_portfolio_csv(tmp_path, [
+            ("Tall Tree", "WS", "Corporate", "WK61NR", "$30,000.00", "2%", "", "", ""),
+            ("1829 East 2nd", "Vancouver", "Property", "6113", "$1,900,000.00", "-5%", "", "", ""),
+        ])
+        result = extract_passive_income(str(tmp_path), source="csv")
+        assert result is not None
+        assert result["corporate_balance"] == 30000.0
+        assert result["property_balance"] == 1900000.0
