@@ -201,7 +201,7 @@ def extract_passive_income(folder: str) -> dict | None:
                 property_accts.append(entry)
             elif asset_type in ("RRSP", "RESP"):
                 registered.append(entry)
-            elif (income_annual > 0 or growth_annual > 0) and asset_type in ACCESSIBLE_TYPES:
+            elif asset_type in ACCESSIBLE_TYPES:
                 accessible.append(entry)
 
     if not accessible and not registered and not corporate_accts and not property_accts:
