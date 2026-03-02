@@ -41,7 +41,7 @@ jobs:
 
       - name: Encrypt dashboard with staticrypt
         run: |
-          npx staticrypt dashboard.html "$STATICRYPT_PASSWORD" -o _site/index.html
+          npx staticrypt dashboard.html -p "$STATICRYPT_PASSWORD" -o _site/index.html
           printf "User-agent: *\nDisallow: /\n" > _site/robots.txt
         env:
           STATICRYPT_PASSWORD: ${{ secrets.STATICRYPT_PASSWORD }}
