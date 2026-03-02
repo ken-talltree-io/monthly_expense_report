@@ -162,7 +162,7 @@ def generate_html(data: dict, ai_html: str | None = None,
 
     # Sub months (last 6 only) and headers
     sub_months = months[-6:]
-    sub_month_headers = "".join(f"<th style='text-align:right'>{datetime.strptime(m, '%Y-%m').strftime('%b %Y')}</th>" for m in sub_months)
+    sub_month_headers = "".join(f"<th class='sub-month-col' style='text-align:right'>{datetime.strptime(m, '%Y-%m').strftime('%b %Y')}</th>" for m in sub_months)
 
     # Subscription table rows — grouped by status
     sub_by_status = defaultdict(list)
@@ -193,9 +193,9 @@ def generate_html(data: dict, ai_html: str | None = None,
             for m in sub_months:
                 val = s["history"].get(m, 0)
                 if val > 0:
-                    month_cells += f"<td style='text-align:right'>{money(val)}</td>"
+                    month_cells += f"<td class='sub-month-col' style='text-align:right'>{money(val)}</td>"
                 else:
-                    month_cells += "<td style='text-align:center;color:#ccc'>—</td>"
+                    month_cells += "<td class='sub-month-col' style='text-align:center;color:#ccc'>—</td>"
             alert_html = "<br>".join(f"<small style='color:#e74c3c'>{a}</small>" for a in s["alerts"]) if s["alerts"] else ""
             note = notes.get(s["merchant"].lower(), "")
             note_html = f"<br><small style='color:#4e79a7;font-style:italic'>Note: {note}</small>" if note else ""
@@ -220,11 +220,11 @@ def generate_html(data: dict, ai_html: str | None = None,
             val = month_amounts.get(m, 0)
             if val > 0:
                 fixed_monthly_totals[m] += val
-                month_cells += f"<td style='text-align:right'>{money(val)}</td>"
+                month_cells += f"<td class='sub-month-col' style='text-align:right'>{money(val)}</td>"
             else:
-                month_cells += "<td style='text-align:center;color:#ccc'>—</td>"
+                month_cells += "<td class='sub-month-col' style='text-align:center;color:#ccc'>—</td>"
         fixed_rows += f"<tr><td><strong>{merchant}</strong></td><td style='text-align:right'>{money(avg_per_month)}</td>{month_cells}</tr>"
-    fixed_footer_cells = "".join(f"<td style='text-align:right'>{money(fixed_monthly_totals[m])}</td>" for m in sub_months)
+    fixed_footer_cells = "".join(f"<td class='sub-month-col' style='text-align:right'>{money(fixed_monthly_totals[m])}</td>" for m in sub_months)
     visible_fixed_total = sum(fixed_monthly_totals.values())
     fixed_avg_per_month = money(visible_fixed_total / num_months if num_months else 0)
 
@@ -353,8 +353,8 @@ def generate_html(data: dict, ai_html: str | None = None,
             anom_detail = (
                 f'<div style="margin-top:12px">'
                 f'<div style="font-weight:600;margin-bottom:6px;font-size:0.85em;color:#e15759">Anomalies</div>'
-                f'<table class="data-table"><thead><tr><th>Severity</th><th>Type</th><th>Description</th><th style="text-align:right">Amount</th></tr></thead>'
-                f'<tbody>{anom_detail_rows}</tbody></table></div>'
+                f'<div class="table-scroll"><table class="data-table"><thead><tr><th>Severity</th><th>Type</th><th>Description</th><th style="text-align:right">Amount</th></tr></thead>'
+                f'<tbody>{anom_detail_rows}</tbody></table></div></div>'
             )
 
         detail_html = ""
@@ -363,16 +363,16 @@ def generate_html(data: dict, ai_html: str | None = None,
                 f'<tr class="cat-detail" style="display:none">'
                 f'<td colspan="{col_count}" style="padding:0">'
                 f'<div style="padding:12px 20px;background:#f8f9fa;border-top:1px solid var(--border)">'
-                f'<div style="display:grid;grid-template-columns:1fr 1fr;gap:20px">'
+                f'<div class="detail-grid">'
                 f'<div>'
                 f'<div style="font-weight:600;margin-bottom:6px;font-size:0.85em;color:var(--accent)">Top Merchants</div>'
-                f'<table class="data-table"><thead><tr><th>Merchant</th><th style="text-align:right">Total</th></tr></thead>'
-                f'<tbody>{merchant_rows}</tbody></table>'
+                f'<div class="table-scroll"><table class="data-table"><thead><tr><th>Merchant</th><th style="text-align:right">Total</th></tr></thead>'
+                f'<tbody>{merchant_rows}</tbody></table></div>'
                 f'</div>'
                 f'<div>'
                 f'<div style="font-weight:600;margin-bottom:6px;font-size:0.85em;color:var(--accent)">Biggest Transactions</div>'
-                f'<table class="data-table"><thead><tr><th>Merchant</th><th style="text-align:center">Date</th><th style="text-align:right">Amount</th></tr></thead>'
-                f'<tbody>{txn_rows}</tbody></table>'
+                f'<div class="table-scroll"><table class="data-table"><thead><tr><th>Merchant</th><th style="text-align:center">Date</th><th style="text-align:right">Amount</th></tr></thead>'
+                f'<tbody>{txn_rows}</tbody></table></div>'
                 f'</div>'
                 f'</div>'
                 f'{anom_detail}'
@@ -584,6 +584,9 @@ def generate_html(data: dict, ai_html: str | None = None,
                 }}
             }},
             scales: {{
+                x: {{
+                    ticks: {{ maxRotation: 45, maxTicksLimit: 8 }}
+                }},
                 y: {{
                     ticks: {{
                         callback: function(v) {{ return v + '%'; }}
@@ -1075,7 +1078,7 @@ def generate_html(data: dict, ai_html: str | None = None,
                 }}
             }},
             scales: {{
-                x: {{ stacked: true }},
+                x: {{ stacked: true, ticks: {{ maxRotation: 45, maxTicksLimit: 8 }} }},
                 y: {{
                     stacked: true,
                     ticks: {{
@@ -1298,13 +1301,13 @@ def generate_html(data: dict, ai_html: str | None = None,
     </div>
     <p class="section-desc">Revenue from Tall Tree Technology (client payments) and dividends from Britton Holdings Growth (investment portfolio)</p>
     {corp_revenue_warning}
-    <table class="data-table table-narrow">
+    <div class="table-scroll"><table class="data-table table-narrow">
         <thead><tr><th>Month</th><th style="text-align:right">Revenue (Tall Tree)</th><th style="text-align:right">Dividends (BH Growth)</th><th style="text-align:right">Total</th></tr></thead>
         <tbody>{corp_rows}</tbody>
         <tfoot>
             <tr style="font-weight:700"><td>Trailing 3-Mo Avg</td><td style="text-align:right">{money(corp_revenue_avg)}</td><td style="text-align:right">{money(corp_div_avg)}</td><td style="text-align:right">{money(corp_trailing_total_avg)}</td></tr>
         </tfoot>
-    </table>
+    </table></div>
 </section>"""
 
     # ── Other Income section (e-transfers + bank interest, last 6 months) ──
@@ -1356,10 +1359,10 @@ def generate_html(data: dict, ai_html: str | None = None,
     </div>
     <p class="section-desc">e-Transfer reimbursements and bank interest (last 6 months) &mdash; {other_count} transactions totalling {money(other_total)}</p>
     {''.join(f'<p style="font-size:0.85em;color:var(--muted);margin:0.3em 0"><em>Adjusted for {money(adj)} pass-through ({desc}): &minus;{money(adj)} in interest excluded</em></p>' for desc, adj in (passthrough_adj or {}).items())}
-    <table class="data-table table-narrow">
+    <div class="table-scroll"><table class="data-table table-narrow">
         <thead><tr><th>Date</th><th>Source</th><th>Detail</th><th style="text-align:right">Amount</th></tr></thead>
         <tbody>{other_rows}</tbody>
-    </table>
+    </table></div>
 </section>"""
 
     # ── Passive Income section ──
@@ -1487,14 +1490,14 @@ def generate_html(data: dict, ai_html: str | None = None,
                 )
             reg_html = f"""
     <h3 style="margin-top:30px">Registered Accounts <span style="font-weight:400;color:var(--muted);font-size:0.85em">(RRSP, RESP — not accessible without tax penalty)</span></h3>
-    <table class="data-table" style="max-width:100%">
+    <div class="table-scroll"><table class="data-table" style="max-width:100%">
         <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right" title="All-time return reported by brokerage (performance report or statement)">Return</th><th style="text-align:right" title="Annual income from dividends, interest, or yield">Income/yr</th><th style="text-align:right" title="Annual capital appreciation (return minus income)">Growth/yr</th><th style="text-align:right" title="Modified Dietz return annualized from statement balance history">TWR</th></tr></thead>
         <tbody>{reg_rows}</tbody>
         <tfoot>
             <tr style="font-weight:700"><td colspan="3">Total Registered</td><td style="text-align:right">{money(passive_income['registered_balance'])}</td><td style="text-align:right"></td><td style="text-align:right">{money(passive_income['registered_annual'])}</td><td style="text-align:right">{money(passive_income.get('registered_growth', 0))}</td><td></td></tr>
             <tr style="color:var(--muted)"><td colspan="7">Monthly Income</td><td style="text-align:right">{money(passive_income['registered_monthly'])}</td></tr>
         </tfoot>
-    </table>"""
+    </table></div>"""
 
         portfolio_monthly = acc_monthly + registered_monthly
         passive_section = f"""
@@ -1505,14 +1508,14 @@ def generate_html(data: dict, ai_html: str | None = None,
     </div>
     <p class="section-desc">Yield and growth from personal investment accounts — accessible and registered holdings</p>
     <h3>Accessible Accounts</h3>
-    <table class="data-table" style="max-width:100%">
+    <div class="table-scroll"><table class="data-table" style="max-width:100%">
         <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right" title="All-time return reported by brokerage (performance report or statement)">Return</th><th style="text-align:right" title="Annual income from dividends, interest, or yield">Income/yr</th><th style="text-align:right" title="Annual capital appreciation (return minus income)">Growth/yr</th><th style="text-align:right" title="Modified Dietz return annualized from statement balance history">TWR</th></tr></thead>
         <tbody>{acc_rows}</tbody>
         <tfoot>
             <tr style="font-weight:700"><td colspan="3">Total Accessible</td><td style="text-align:right">{money(acc_total_balance)}</td><td style="text-align:right"></td><td style="text-align:right">{money(acc_total_income)}</td><td style="text-align:right">{money(acc_total_growth)}</td><td></td></tr>
             <tr style="color:var(--muted)"><td colspan="7">Monthly Income</td><td style="text-align:right">{money(acc_monthly)}</td></tr>
         </tfoot>
-    </table>
+    </table></div>
     {reg_html}
 </section>"""
 
@@ -1547,7 +1550,7 @@ def generate_html(data: dict, ai_html: str | None = None,
                 tooltip: {{ callbacks: {{ label: ctx => ctx.dataset.label + ': $' + ctx.parsed.y.toLocaleString(undefined, {{minimumFractionDigits:2}}) }} }}
             }},
             scales: {{
-                x: {{ stacked: true }},
+                x: {{ stacked: true, ticks: {{ maxRotation: 45, maxTicksLimit: 8 }} }},
                 y: {{ stacked: true, beginAtZero: true, ticks: {{ callback: v => '$' + (v/1000).toFixed(0) + 'k' }} }}
             }}
         }}
@@ -1591,8 +1594,8 @@ h2 {{ font-size: 1.3em; margin-bottom: 15px; color: var(--accent); border-bottom
     .stats {{ grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }}
     .stat {{ padding: 14px; }}
     .stat .value {{ font-size: 1.4em; }}
-    .tab-nav {{ padding: 10px 15px; gap: 6px; }}
-    .tab-nav button {{ padding: 6px 12px; font-size: 0.82em; }}
+    .tab-nav {{ padding: 10px 12px; gap: 6px; }}
+    .tab-nav button {{ padding: 10px 16px; font-size: 0.82em; min-height: 44px; }}
     .card {{ padding: 18px; }}
     body {{ padding: 12px; }}
 }}
@@ -1609,6 +1612,9 @@ h2 {{ font-size: 1.3em; margin-bottom: 15px; color: var(--accent); border-bottom
     h2 {{ font-size: 1.1em; }}
     .data-table {{ font-size: 0.8em; }}
     .data-table th, .data-table td {{ padding: 6px 8px; }}
+    .detail-grid {{ grid-template-columns: 1fr; }}
+    .tab-nav button {{ padding: 8px 12px; min-height: 44px; }}
+    .sub-month-col {{ display: none; }}
 }}
 .data-table {{ width: 100%; border-collapse: collapse; font-size: 0.9em; }}
 .data-table th {{ background: var(--bg); padding: 10px 12px; text-align: left; font-weight: 600; position: sticky; top: 0; }}
@@ -1635,7 +1641,7 @@ h2 {{ font-size: 1.3em; margin-bottom: 15px; color: var(--accent); border-bottom
 canvas {{ max-width: 100%; }}
 .noscript-table {{ margin-top: 10px; }}
 .tab-nav {{ display: flex; flex-wrap: wrap; gap: 8px; background: var(--card); border-radius: 12px; padding: 15px 25px; margin-bottom: 20px; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }}
-.tab-nav button {{ border: none; cursor: pointer; font-family: inherit; color: var(--accent); background: var(--bg); padding: 7px 18px; border-radius: 20px; font-size: 0.88em; font-weight: 500; transition: background 0.15s, color 0.15s; }}
+.tab-nav button {{ border: none; cursor: pointer; font-family: inherit; color: var(--accent); background: var(--bg); padding: 7px 18px; border-radius: 20px; font-size: 0.88em; font-weight: 500; transition: background 0.15s, color 0.15s; min-height: 44px; }}
 .tab-nav button:hover {{ background: var(--accent); color: #fff; }}
 .tab-nav button.active {{ background: var(--accent); color: #fff; }}
 .tab-panel {{ display: none; }}
@@ -1667,6 +1673,7 @@ canvas {{ max-width: 100%; }}
 .group-header {{ background: var(--bg); font-weight: 600; }}
 .table-narrow {{ max-width: 600px; }}
 .table-scroll {{ overflow-x: auto; }}
+.detail-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }}
 </style>
 </head>
 <body>
@@ -1727,14 +1734,14 @@ canvas {{ max-width: 100%; }}
     <table class="data-table">
         <thead><tr><th>Service</th><th style="text-align:right">Avg/Mo</th>{sub_month_headers}</tr></thead>
         <tbody>{sub_rows}</tbody>
-        <tfoot><tr style="font-weight:700"><td>Total Subscriptions</td><td style="text-align:right">{money(total_monthly)}/mo</td><td colspan="{len(sub_months)}"></td></tr></tfoot>
+        <tfoot><tr style="font-weight:700"><td>Total Subscriptions</td><td style="text-align:right">{money(total_monthly)}/mo</td><td class="sub-month-col" colspan="{len(sub_months)}"></td></tr></tfoot>
     </table>
     </div>
 </section>
 
 {'<section id="fixed-costs" class="card"><h2>Fixed Costs Breakdown</h2><p class="section-desc">All fixed-cost merchants (utilities, insurance, etc.) with monthly amounts over the last 6 months.</p><div class="table-scroll"><table class="data-table"><thead><tr><th>Merchant</th><th style="text-align:right">Avg/Mo</th>' + sub_month_headers + '</tr></thead><tbody>' + fixed_rows + '</tbody><tfoot><tr style="font-weight:700"><td>Total Fixed Costs</td><td style="text-align:right">' + fixed_avg_per_month + '/mo</td>' + fixed_footer_cells + '</tr></tfoot></table></div></section>' if fixed_detail else ''}
 
-{'<section id="interac-transfers" class="card"><h2>Interac e-Transfer Details</h2><p class="section-desc">All outgoing e-Transfers &mdash; ' + str(len(etransfer_txns)) + ' transactions totalling ' + money(etransfer_total) + '</p><table class="data-table"><thead><tr><th>Date</th><th>Note</th><th style="text-align:right">Amount</th></tr></thead><tbody>' + etransfer_rows + '</tbody></table></section>' if etransfer_txns else ''}
+{'<section id="interac-transfers" class="card"><h2>Interac e-Transfer Details</h2><p class="section-desc">All outgoing e-Transfers &mdash; ' + str(len(etransfer_txns)) + ' transactions totalling ' + money(etransfer_total) + '</p><div class="table-scroll"><table class="data-table"><thead><tr><th>Date</th><th>Note</th><th style="text-align:right">Amount</th></tr></thead><tbody>' + etransfer_rows + '</tbody></table></div></section>' if etransfer_txns else ''}
 </div>
 
 <!-- ═══ MILESTONES ═══ -->
