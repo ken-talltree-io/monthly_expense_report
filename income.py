@@ -98,6 +98,7 @@ def extract_passive_income(folder: str) -> dict | None:
         col_type = next((i for i, c in enumerate(h) if "asset" in c or c == "type"), 1)
         col_start_date = next((i for i, c in enumerate(h) if "start date" in c), None)
         col_suffix = next((i for i, c in enumerate(h) if "suffix" in c), None)
+        col_status = next((i for i, c in enumerate(h) if "status" in c), None)
 
         for row in reader:
             if len(row) <= max(col_account, col_type):
@@ -105,6 +106,10 @@ def extract_passive_income(folder: str) -> dict | None:
 
             account = row[col_account].strip().replace("\n", " ")
             asset_type = row[col_type].strip().replace("\n", " ")
+
+            # Account status from CSV (e.g. "Closed")
+            status = row[col_status].strip().lower() if col_status is not None and col_status < len(row) else ""
+            is_closed = status == "closed"
 
             # Skip totals row
             if not account:
@@ -194,7 +199,9 @@ def extract_passive_income(folder: str) -> dict | None:
                 "balance_history": stmt.get("balance_history", []) if stmt else [],
             }
 
-            # Route to appropriate bucket
+            # Skip closed accounts with zero balance
+            if is_closed and total_value == 0:
+                continue
             if asset_type == "Corporate":
                 corporate_accts.append(entry)
             elif asset_type == "Property":
