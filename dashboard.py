@@ -172,17 +172,23 @@ def generate_html(data: dict, ai_html: str | None = None,
     status_order = ["new", "price_change", "stopped", "stable"]
     status_labels = {"stable": "Stable", "price_change": "Price Change", "new": "New", "stopped": "Stopped"}
 
+    # Compute visible (6-month) averages for subscriptions
+    def _visible_avg(s):
+        amounts = [s["history"].get(m, 0) for m in sub_months if s["history"].get(m, 0) > 0]
+        return sum(amounts) / len(amounts) if amounts else s["avg"]
+
     sub_rows = ""
-    total_monthly = sum(s["avg"] for s in data["subscriptions"])
+    total_monthly = sum(_visible_avg(s) for s in data["subscriptions"])
     for status in status_order:
         subs = sub_by_status.get(status, [])
         if not subs:
             continue
-        group_total = sum(s["avg"] for s in subs)
+        group_total = sum(_visible_avg(s) for s in subs)
         num_cols = len(sub_months) + 2  # Service + Avg + months
         label = status_labels.get(status, status.title())
         sub_rows += f'<tr class="group-header"><td colspan="{num_cols}">{status_badge(status)} {label} — {money(group_total)}/mo ({len(subs)})</td></tr>'
         for s in subs:
+            v_avg = _visible_avg(s)
             month_cells = ""
             for m in sub_months:
                 val = s["history"].get(m, 0)
@@ -195,7 +201,7 @@ def generate_html(data: dict, ai_html: str | None = None,
             note_html = f"<br><small style='color:#4e79a7;font-style:italic'>Note: {note}</small>" if note else ""
             sub_rows += f"""<tr>
             <td><strong>{s['merchant']}</strong>{('<br>' + alert_html) if alert_html else ''}{note_html}</td>
-            <td style="text-align:right">{money(s['avg'])}</td>
+            <td style="text-align:right">{money(v_avg)}</td>
             {month_cells}
         </tr>"""
 
@@ -222,9 +228,9 @@ def generate_html(data: dict, ai_html: str | None = None,
     visible_fixed_total = sum(fixed_monthly_totals.values())
     fixed_avg_per_month = money(visible_fixed_total / num_months if num_months else 0)
 
-    # Interac e-Transfer detail table (grouped by month, sorted by date)
+    # Interac e-Transfer detail table (last 6 months, grouped by month, sorted by date)
     etransfer_txns = sorted(
-        [t for txns in data["monthly_txns"].values() for t in txns if t["merchant"] == "Interac e-Transfer"],
+        [t for txns in data["monthly_txns"].values() for t in txns if t["merchant"] == "Interac e-Transfer" and str(t["date"])[:7] in set(sub_months)],
         key=lambda t: t["date"], reverse=True
     )
     etransfer_total = sum(t["amount"] for t in etransfer_txns)
@@ -454,10 +460,10 @@ def generate_html(data: dict, ai_html: str | None = None,
     corp_revenue_takehome = round(corp_revenue_avg * CORPORATE_TAKE_HOME_RATE, 2)
     corp_monthly_takehome = corp_revenue_takehome + corp_div_avg
 
-    # Other actual income — monthly averages over the reporting period
-    num_months_total = len(months) or 1
-    etransfer_in_monthly_avg = round(sum(t["amount"] for t in (incoming_etransfers or [])) / num_months_total, 2)
-    bank_interest_monthly_avg = round(sum(t["amount"] for t in (bank_interest or [])) / num_months_total, 2)
+    # Other actual income — monthly averages over trailing 3 months
+    recent_months_set = set(recent_months)
+    etransfer_in_monthly_avg = round(sum(t["amount"] for t in (incoming_etransfers or []) if str(t["date"])[:7] in recent_months_set) / len(recent_months), 2) if recent_months else 0
+    bank_interest_monthly_avg = round(sum(t["amount"] for t in (bank_interest or []) if str(t["date"])[:7] in recent_months_set) / len(recent_months), 2) if recent_months else 0
     other_income_monthly = etransfer_in_monthly_avg + bank_interest_monthly_avg
 
     combined_monthly = monthly_passive + corp_monthly_takehome + other_income_monthly
@@ -494,18 +500,13 @@ def generate_html(data: dict, ai_html: str | None = None,
         savings_rate_by_month[m] = round((savings / inc * 100), 1) if inc > 0 else 0
 
     savings_rates_list = [savings_rate_by_month[m] for m in months]
-    savings_avg = round(sum(savings_rates_list) / len(savings_rates_list), 1) if savings_rates_list else 0
     trailing_3_rates = savings_rates_list[-3:]
     savings_3mo_avg = round(sum(trailing_3_rates) / len(trailing_3_rates), 1) if trailing_3_rates else 0
     savings_current = savings_rates_list[-1] if savings_rates_list else 0
-    savings_best_rate = max(savings_rates_list) if savings_rates_list else 0
-    savings_best_month = months[savings_rates_list.index(savings_best_rate)] if savings_rates_list else ""
 
     # ── Savings rate section HTML ──
     def _sr_color(rate):
         return "#27ae60" if rate >= 0 else "#e74c3c"
-
-    savings_best_label = datetime.strptime(savings_best_month, "%Y-%m").strftime("%b %Y") if savings_best_month else ""
     savings_rate_section = ""
     if has_income:
         sr_chart_labels = json.dumps(month_labels)
@@ -527,21 +528,13 @@ def generate_html(data: dict, ai_html: str | None = None,
                 <div class="value" style="color:{_sr_color(savings_3mo_avg)}">{savings_3mo_avg:+.1f}%</div>
                 <div class="label">3-Month Avg</div>
             </div>
-            <div class="stat">
-                <div class="value" style="color:{_sr_color(savings_avg)}">{savings_avg:+.1f}%</div>
-                <div class="label">Overall Avg</div>
-            </div>
-            <div class="stat">
-                <div class="value" style="color:#27ae60">{savings_best_rate:+.1f}%</div>
-                <div class="label">Best ({savings_best_label})</div>
-            </div>
         </div>
         <div class="chart-container">
             <canvas id="savingsRateChart" height="100"></canvas>
         </div>
     </div>"""
 
-        sr_avg_line = json.dumps([savings_avg] * len(months))
+        sr_avg_line = json.dumps([savings_3mo_avg] * len(months))
         savings_rate_chart_js = f"""
     new Chart(document.getElementById('savingsRateChart'), {{
         type: 'line',
@@ -559,7 +552,7 @@ def generate_html(data: dict, ai_html: str | None = None,
                 pointBorderColor: {sr_chart_data}.map(v => v >= 0 ? '#27ae60' : '#e74c3c'),
                 borderWidth: 2
             }}, {{
-                label: 'Average ({savings_avg}%)',
+                label: '3-Mo Avg ({savings_3mo_avg}%)',
                 data: {sr_avg_line},
                 borderColor: 'rgba(39, 174, 96, 0.5)',
                 borderDash: [6, 4],
@@ -1277,15 +1270,17 @@ def generate_html(data: dict, ai_html: str | None = None,
             return f'<td>{date_str}</td><td>{t["account"]}</td><td style="text-align:right">{money(t["amount"])}</td>'
         bi_rows = month_grouped_rows(bank_interest, _bi_row)
 
-    # ── Income tab top-level stats ──
+    # ── Income tab top-level stats (trailing 3 months) ──
     income_tab_stats = ""
     if corporate_income or incoming_etransfers or bank_interest:
-        income_num_months = len(months) or 1
-        income_monthly_avg = total_income_actual / income_num_months if total_income_actual > 0 else 0
+        income_trailing_3 = months[-3:] if len(months) >= 3 else months
+        income_trailing_n = len(income_trailing_3) or 1
+        income_trailing_total = sum(income_by_month.get(m, 0) for m in income_trailing_3)
+        income_trailing_avg = income_trailing_total / income_trailing_n
         income_tab_stats = f"""
 <div class="stats">
-    <div class="stat"><div class="value" style="color:#27ae60">{money(total_income_actual)}</div><div class="label">Total Income ({len(months)} months)</div></div>
-    <div class="stat"><div class="value" style="color:#27ae60">{money(income_monthly_avg)}</div><div class="label">Avg Monthly Income</div></div>"""
+    <div class="stat"><div class="value" style="color:#27ae60">{money(income_trailing_total)}</div><div class="label">Total Income (3 months)</div></div>
+    <div class="stat"><div class="value" style="color:#27ae60">{money(income_trailing_avg)}</div><div class="label">3-Mo Avg Income</div></div>"""
         if cashback_total > 0:
             income_tab_stats += f"""
     <div class="stat"><div class="value" style="color:#27ae60">{money(cashback_total)}</div><div class="label">VISA Cash-Back ({len(months)} months)</div></div>"""
@@ -1307,26 +1302,30 @@ def generate_html(data: dict, ai_html: str | None = None,
         <thead><tr><th>Month</th><th style="text-align:right">Revenue (Tall Tree)</th><th style="text-align:right">Dividends (BH Growth)</th><th style="text-align:right">Total</th></tr></thead>
         <tbody>{corp_rows}</tbody>
         <tfoot>
-            <tr style="font-weight:700"><td>Total</td><td style="text-align:right">{money(corporate_income['revenue_total'])}</td><td style="text-align:right">{money(corporate_income['dividends_total'])}</td><td style="text-align:right">{money(corporate_income['total_income'])}</td></tr>
-            <tr style="color:var(--muted)"><td>Trailing Avg (3-mo)</td><td style="text-align:right">{money(corp_revenue_avg)}</td><td style="text-align:right">{money(corp_div_avg)}</td><td style="text-align:right">{money(corp_trailing_total_avg)}</td></tr>
+            <tr style="font-weight:700"><td>Trailing 3-Mo Avg</td><td style="text-align:right">{money(corp_revenue_avg)}</td><td style="text-align:right">{money(corp_div_avg)}</td><td style="text-align:right">{money(corp_trailing_total_avg)}</td></tr>
         </tfoot>
     </table>
 </section>"""
 
-    # ── Other Income section (e-transfers + bank interest in one table) ──
+    # ── Other Income section (e-transfers + bank interest, last 6 months) ──
     other_income_section = ""
+    sub_months_set = set(sub_months)
     if incoming_etransfers or bank_interest:
         other_txns = []
         for t in incoming_etransfers:
+            if str(t["date"])[:7] not in sub_months_set:
+                continue
             date_str = str(t["date"])[:10]
             amt_str = f'{t["amount"]:.2f}'
             note = etransfer_in_notes.get((date_str, amt_str), "") if incoming_etransfers else ""
             other_txns.append((t["date"], "e-Transfer", note, t["amount"]))
         for t in bank_interest:
+            if str(t["date"])[:7] not in sub_months_set:
+                continue
             other_txns.append((t["date"], "Interest", t["account"], t["amount"]))
         other_txns.sort(key=lambda x: x[0], reverse=True)
-        other_total = etransfer_in_total + bi_total
-        other_count = len(incoming_etransfers) + len(bank_interest)
+        other_total = sum(t[3] for t in other_txns)
+        other_count = len(other_txns)
 
         def _other_row(t):
             date_str = str(t[0])[:10]
@@ -1355,7 +1354,7 @@ def generate_html(data: dict, ai_html: str | None = None,
         <h2 style="margin-bottom:0">Other Income</h2>
         <div style="font-size:1.3em;font-weight:700;color:#27ae60">{money(other_income_monthly)}<span style="font-size:0.55em;font-weight:400;color:var(--muted)">/mo avg</span></div>
     </div>
-    <p class="section-desc">e-Transfer reimbursements and bank interest &mdash; {other_count} transactions totalling {money(other_total)}</p>
+    <p class="section-desc">e-Transfer reimbursements and bank interest (last 6 months) &mdash; {other_count} transactions totalling {money(other_total)}</p>
     {''.join(f'<p style="font-size:0.85em;color:var(--muted);margin:0.3em 0"><em>Adjusted for {money(adj)} pass-through ({desc}): &minus;{money(adj)} in interest excluded</em></p>' for desc, adj in (passthrough_adj or {}).items())}
     <table class="data-table table-narrow">
         <thead><tr><th>Date</th><th>Source</th><th>Detail</th><th style="text-align:right">Amount</th></tr></thead>
