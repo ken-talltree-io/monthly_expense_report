@@ -6,3 +6,8 @@ transactions/** filter=git-crypt diff=git-crypt
 portfolio.csv filter=git-crypt diff=git-crypt
 notes.csv filter=git-crypt diff=git-crypt
 etransfer-notes.csv filter=git-crypt diff=git-crypt
+budgets.csv filter=git-crypt diff=git-crypt
+categories.csv filter=git-crypt diff=git-crypt
+liabilities.csv filter=git-crypt diff=git-crypt
+passthrough.csv filter=git-crypt diff=git-crypt
+config.py filter=git-crypt diff=git-crypt
