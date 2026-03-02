@@ -204,7 +204,11 @@ def generate_html(data: dict, ai_html: str | None = None,
     fixed_rows = ""
     fixed_monthly_totals = {m: 0 for m in sub_months}
     for merchant, total, month_amounts in fixed_detail:
-        avg_per_month = total / num_months if num_months else 0
+        visible_total = sum(month_amounts.get(m, 0) for m in sub_months)
+        if visible_total == 0:
+            continue
+        active_months = sum(1 for m in sub_months if month_amounts.get(m, 0) > 0)
+        avg_per_month = visible_total / active_months if active_months else 0
         month_cells = ""
         for m in sub_months:
             val = month_amounts.get(m, 0)
@@ -215,7 +219,8 @@ def generate_html(data: dict, ai_html: str | None = None,
                 month_cells += "<td style='text-align:center;color:#ccc'>—</td>"
         fixed_rows += f"<tr><td><strong>{merchant}</strong></td><td style='text-align:right'>{money(avg_per_month)}</td>{month_cells}</tr>"
     fixed_footer_cells = "".join(f"<td style='text-align:right'>{money(fixed_monthly_totals[m])}</td>" for m in sub_months)
-    fixed_avg_per_month = money(fixed_total / num_months if num_months else 0)
+    visible_fixed_total = sum(fixed_monthly_totals.values())
+    fixed_avg_per_month = money(visible_fixed_total / num_months if num_months else 0)
 
     # Interac e-Transfer detail table (grouped by month, sorted by date)
     etransfer_txns = sorted(
