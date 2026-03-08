@@ -440,6 +440,17 @@ def generate_html(data: dict, ai_html: str | None = None,
     monthly_passive = acc_monthly_passive + registered_monthly
     annual_passive = (passive_income["annual_income"] if passive_income else 0) + (passive_income["registered_annual"] if passive_income else 0)
 
+    # Build actual monthly passive income from dividend_history
+    # Exclude Cash accounts — their interest is already in bank_int_by_month from CSV INT rows
+    passive_by_month: dict[str, float] = defaultdict(float)
+    if passive_income:
+        for cat in ["accounts", "registered_accounts"]:
+            for a in passive_income.get(cat, []):
+                if a.get("type") == "Cash":
+                    continue
+                for dh in a.get("dividend_history", []):
+                    passive_by_month[dh["month"]] += dh["amount"]
+
     # Corporate income components — trailing 6-month average (same window as burn rate)
     if corporate_income:
         corp_months_all = sorted(set(
@@ -484,7 +495,7 @@ def generate_html(data: dict, ai_html: str | None = None,
     for m in months:
         corp_rev = corporate_income["revenue_monthly"].get(m, 0) * CORPORATE_TAKE_HOME_RATE if corporate_income else 0
         corp_div = corporate_income["dividends_monthly"].get(m, 0) if corporate_income else 0
-        passive_m = monthly_passive  # spread evenly
+        passive_m = passive_by_month.get(m, monthly_passive)  # actual dividends, fallback to average
         etransfer_m = etransfer_by_month.get(m, 0)
         bank_int_m = bank_int_by_month.get(m, 0)
         income_by_month[m] = corp_rev + corp_div + passive_m + etransfer_m + bank_int_m
@@ -1273,17 +1284,17 @@ def generate_html(data: dict, ai_html: str | None = None,
             return f'<td>{date_str}</td><td>{t["account"]}</td><td style="text-align:right">{money(t["amount"])}</td>'
         bi_rows = month_grouped_rows(bank_interest, _bi_row)
 
-    # ── Income tab top-level stats (trailing 3 months) ──
+    # ── Income tab top-level stats (trailing 6 months, matching burn rate) ──
     income_tab_stats = ""
-    if corporate_income or incoming_etransfers or bank_interest:
-        income_trailing_3 = months[-3:] if len(months) >= 3 else months
-        income_trailing_n = len(income_trailing_3) or 1
-        income_trailing_total = sum(income_by_month.get(m, 0) for m in income_trailing_3)
+    if has_income:
+        income_trailing = months[-6:] if len(months) >= 6 else months
+        income_trailing_n = len(income_trailing) or 1
+        income_trailing_total = sum(income_by_month.get(m, 0) for m in income_trailing)
         income_trailing_avg = income_trailing_total / income_trailing_n
         income_tab_stats = f"""
 <div class="stats">
-    <div class="stat"><div class="value" style="color:#27ae60">{money(income_trailing_total)}</div><div class="label">Total Income (3 months)</div></div>
-    <div class="stat"><div class="value" style="color:#27ae60">{money(income_trailing_avg)}</div><div class="label">3-Mo Avg Income</div></div>"""
+    <div class="stat"><div class="value" style="color:#27ae60">{money(income_trailing_total)}</div><div class="label">Total Income ({income_trailing_n} months)</div></div>
+    <div class="stat"><div class="value" style="color:#27ae60">{money(income_trailing_avg)}</div><div class="label">6-Mo Avg Income</div></div>"""
         if cashback_total > 0:
             income_tab_stats += f"""
     <div class="stat"><div class="value" style="color:#27ae60">{money(cashback_total)}</div><div class="label">VISA Cash-Back ({len(months)} months)</div></div>"""
@@ -1305,7 +1316,7 @@ def generate_html(data: dict, ai_html: str | None = None,
         <thead><tr><th>Month</th><th style="text-align:right">Revenue (Tall Tree)</th><th style="text-align:right">Dividends (BH Growth)</th><th style="text-align:right">Total</th></tr></thead>
         <tbody>{corp_rows}</tbody>
         <tfoot>
-            <tr style="font-weight:700"><td>Trailing 3-Mo Avg</td><td style="text-align:right">{money(corp_revenue_avg)}</td><td style="text-align:right">{money(corp_div_avg)}</td><td style="text-align:right">{money(corp_trailing_total_avg)}</td></tr>
+            <tr style="font-weight:700"><td>Trailing {corp_trailing_n}-Mo Avg</td><td style="text-align:right">{money(corp_revenue_avg)}</td><td style="text-align:right">{money(corp_div_avg)}</td><td style="text-align:right">{money(corp_trailing_total_avg)}</td></tr>
         </tfoot>
     </table></div>
 </section>"""
