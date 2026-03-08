@@ -493,11 +493,6 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                     "withdrawals": hist_wdr,
                 })
 
-        if months_seen and total_income > 0:
-            results[suffix]["dividends_annual"] = round(
-                total_income / len(months_seen) * 12, 2
-            )
-
         # Sort balance history and dividend history chronologically
         results[suffix]["balance_history"].sort(key=lambda x: x["date"])
         # Deduplicate balance history: when a savings-format entry (YYYY-MM)
@@ -517,7 +512,24 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                 seen_months[month_key] = len(deduped)
                 deduped.append(entry)
         results[suffix]["balance_history"] = deduped
+        # Deduplicate dividend history: keep the max amount per month
+        # (avoids double-counting when both _identity_ and _person_/Performance
+        # files exist for the same month)
         results[suffix]["dividend_history"].sort(key=lambda x: x["month"])
+        div_by_month: dict[str, float] = {}
+        for entry in results[suffix]["dividend_history"]:
+            m = entry["month"]
+            div_by_month[m] = max(div_by_month.get(m, 0), entry["amount"])
+        results[suffix]["dividend_history"] = [
+            {"month": m, "amount": amt} for m, amt in sorted(div_by_month.items())
+        ]
+        # Recompute annual income from deduped dividend history
+        if div_by_month:
+            deduped_total = sum(div_by_month.values())
+            if deduped_total > 0:
+                results[suffix]["dividends_annual"] = round(
+                    deduped_total / len(div_by_month) * 12, 2
+                )
 
     # ── Steadyhand (consolidated quarterly PDFs) ────────────────────────────
     sh_dir = os.path.join(stmt_dir, "personal", "Steadyhand")
