@@ -154,8 +154,8 @@ def generate_html(data: dict, ai_html: str | None = None,
     adjusted_total = sum(adjusted_monthly.values())
     adjusted_avg = adjusted_total / len(months) if months else 0
 
-    # Burn rate — recent 3-month trailing average
-    recent_months = months[-3:]
+    # Burn rate — recent 6-month trailing average
+    recent_months = months[-6:]
     burn_rate = sum(adjusted_monthly[m] for m in recent_months) / len(recent_months) if recent_months else 0
 
     # ── Build table rows ──
@@ -440,13 +440,13 @@ def generate_html(data: dict, ai_html: str | None = None,
     monthly_passive = acc_monthly_passive + registered_monthly
     annual_passive = (passive_income["annual_income"] if passive_income else 0) + (passive_income["registered_annual"] if passive_income else 0)
 
-    # Corporate income components — trailing 3-month average (same window as burn rate)
+    # Corporate income components — trailing 6-month average (same window as burn rate)
     if corporate_income:
         corp_months_all = sorted(set(
             list(corporate_income["revenue_monthly"].keys()) +
             list(corporate_income["dividends_monthly"].keys())
         ))
-        corp_trailing = corp_months_all[-3:]  # last 3 months
+        corp_trailing = corp_months_all[-6:]  # last 6 months
         corp_trailing_n = len(corp_trailing)
         corp_revenue_avg = round(sum(corporate_income["revenue_monthly"].get(m, 0) for m in corp_trailing) / corp_trailing_n, 2) if corp_trailing_n else 0
         corp_div_avg = round(sum(corporate_income["dividends_monthly"].get(m, 0) for m in corp_trailing) / corp_trailing_n, 2) if corp_trailing_n else 0
@@ -460,7 +460,7 @@ def generate_html(data: dict, ai_html: str | None = None,
     corp_revenue_takehome = round(corp_revenue_avg * CORPORATE_TAKE_HOME_RATE, 2)
     corp_monthly_takehome = corp_revenue_takehome + corp_div_avg
 
-    # Other actual income — monthly averages over trailing 3 months
+    # Other actual income — monthly averages over trailing 6 months
     recent_months_set = set(recent_months)
     etransfer_in_monthly_avg = round(sum(t["amount"] for t in (incoming_etransfers or []) if str(t["date"])[:7] in recent_months_set) / len(recent_months), 2) if recent_months else 0
     bank_interest_monthly_avg = round(sum(t["amount"] for t in (bank_interest or []) if str(t["date"])[:7] in recent_months_set) / len(recent_months), 2) if recent_months else 0
@@ -665,7 +665,7 @@ def generate_html(data: dict, ai_html: str | None = None,
             <div class="hero-block text-right">
                 <div class="metric-label">Burn Rate</div>
                 <div class="metric-value text-negative">{money(burn_rate)}<span class="unit">/mo</span></div>
-                <div class="metric-sub">3-month trailing avg (net of 2% cash-back)</div>
+                <div class="metric-sub">6-month trailing avg (net of 2% cash-back)</div>
             </div>
         </div>
         <div style="margin-top:20px">
@@ -1464,7 +1464,6 @@ def generate_html(data: dict, ai_html: str | None = None,
                 f"<tr><td>{a['account']}</td><td>{a.get('brokerage','')}</td><td>{a['type']}</td>"
                 f"{balance_cell(a)}"
                 f"{return_cell(a, has_twr=has_twr)}"
-                f"{income_cell(a)}"
                 f"{growth_cell(a)}"
                 f"{twr_cell(a['account'])}</tr>"
             )
@@ -1484,22 +1483,76 @@ def generate_html(data: dict, ai_html: str | None = None,
                     f"<tr><td>{a['account']}</td><td>{a.get('brokerage','')}</td><td>{a['type']}</td>"
                     f"{balance_cell(a)}"
                     f"{return_cell(a, has_twr=has_twr)}"
-                    f"{income_cell(a)}"
                     f"{growth_cell(a)}"
                     f"{twr_cell(a['account'])}</tr>"
                 )
             reg_html = f"""
     <h3 style="margin-top:30px">Registered Accounts <span style="font-weight:400;color:var(--muted);font-size:0.85em">(RRSP, RESP — not accessible without tax penalty)</span></h3>
     <div class="table-scroll"><table class="data-table" style="max-width:100%">
-        <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right" title="All-time return reported by brokerage (performance report or statement)">Return</th><th style="text-align:right" title="Annual income from dividends, interest, or yield">Income/yr</th><th style="text-align:right" title="Annual capital appreciation (return minus income)">Growth/yr</th><th style="text-align:right" title="Modified Dietz return annualized from statement balance history">TWR</th></tr></thead>
+        <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right" title="All-time return reported by brokerage (performance report or statement)">Return</th><th style="text-align:right" title="Annual capital appreciation (return minus income)">Growth/yr</th><th style="text-align:right" title="Modified Dietz return annualized from statement balance history">TWR</th></tr></thead>
         <tbody>{reg_rows}</tbody>
         <tfoot>
-            <tr style="font-weight:700"><td colspan="3">Total Registered</td><td style="text-align:right">{money(passive_income['registered_balance'])}</td><td style="text-align:right"></td><td style="text-align:right">{money(passive_income['registered_annual'])}</td><td style="text-align:right">{money(passive_income.get('registered_growth', 0))}</td><td></td></tr>
-            <tr style="color:var(--muted)"><td colspan="7">Monthly Income</td><td style="text-align:right">{money(passive_income['registered_monthly'])}</td></tr>
+            <tr style="font-weight:700"><td colspan="3">Total Registered</td><td style="text-align:right">{money(passive_income['registered_balance'])}</td><td style="text-align:right"></td><td style="text-align:right">{money(passive_income.get('registered_growth', 0))}</td><td></td></tr>
+            <tr style="color:var(--muted)"><td colspan="6">Monthly Income</td><td style="text-align:right">{money(passive_income['registered_monthly'])}</td></tr>
         </tfoot>
     </table></div>"""
 
         portfolio_monthly = acc_monthly + registered_monthly
+
+        # Build monthly dividend breakdown table
+        all_div_accounts = []  # [(name, {month: amount})]
+        for a in acc_sorted:
+            dh = a.get("dividend_history", [])
+            monthly_map = {entry["month"]: entry["amount"] for entry in dh}
+            has_any_income = any(entry["amount"] > 0 for entry in dh)
+            is_ws_investment = a.get("balance_source") == "Wealthsimple statement" and a.get("type") == "Non-reg"
+            if has_any_income or a.get("income_annual", 0) > 0 or is_ws_investment:
+                all_div_accounts.append((a["account"], monthly_map))
+
+        dividend_breakdown_html = ""
+        if all_div_accounts:
+            all_div_months = sorted(set(m for _, mm in all_div_accounts for m in mm))
+            div_col_headers = "".join(
+                f"<th style='text-align:right'>{name}</th>" for name, _ in all_div_accounts
+            )
+            div_rows = ""
+            col_totals = [0.0] * len(all_div_accounts)
+            for month in reversed(all_div_months):
+                label = datetime.strptime(month, "%Y-%m").strftime("%b %Y")
+                row_total = 0.0
+                cells = ""
+                for i, (_, mm) in enumerate(all_div_accounts):
+                    if month not in mm:
+                        cells += "<td style='text-align:right;color:var(--muted)'>\u2014</td>"
+                    elif mm[month] > 0:
+                        col_totals[i] += mm[month]
+                        row_total += mm[month]
+                        cells += f"<td style='text-align:right'>{money(mm[month])}</td>"
+                    else:
+                        cells += "<td style='text-align:right;color:var(--muted)'>$0</td>"
+                div_rows += f"<tr><td>{label}</td>{cells}<td style='text-align:right;font-weight:600'>{money(row_total)}</td></tr>"
+
+            grand_total = sum(col_totals)
+            div_footer_cells = "".join(f"<td style='text-align:right'>{money(ct)}</td>" for ct in col_totals)
+            # Per-column averages (divide by months with statements, not total months)
+            col_months = [sum(1 for m in all_div_months if m in mm) for _, mm in all_div_accounts]
+            col_avg_cells = "".join(
+                f"<td style='text-align:right'>{money(col_totals[i] / col_months[i])}</td>" if col_months[i] > 0
+                else "<td></td>"
+                for i in range(len(all_div_accounts))
+            )
+            avg = grand_total / len(all_div_months) if all_div_months else 0
+            dividend_breakdown_html = f"""
+    <h3 style="margin-top:30px">Monthly Dividends</h3>
+    <div class="table-scroll"><table class="data-table" style="max-width:100%">
+        <thead><tr><th>Month</th>{div_col_headers}<th style="text-align:right">Total</th></tr></thead>
+        <tbody>{div_rows}</tbody>
+        <tfoot>
+            <tr style="font-weight:700"><td>Total</td>{div_footer_cells}<td style="text-align:right">{money(grand_total)}</td></tr>
+            <tr style="color:var(--muted)"><td>Monthly Avg</td>{col_avg_cells}<td style="text-align:right">{money(avg)}</td></tr>
+        </tfoot>
+    </table></div>"""
+
         passive_section = f"""
 <section id="passive-income" class="card">
     <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap">
@@ -1509,14 +1562,15 @@ def generate_html(data: dict, ai_html: str | None = None,
     <p class="section-desc">Yield and growth from personal investment accounts — accessible and registered holdings</p>
     <h3>Accessible Accounts</h3>
     <div class="table-scroll"><table class="data-table" style="max-width:100%">
-        <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right" title="All-time return reported by brokerage (performance report or statement)">Return</th><th style="text-align:right" title="Annual income from dividends, interest, or yield">Income/yr</th><th style="text-align:right" title="Annual capital appreciation (return minus income)">Growth/yr</th><th style="text-align:right" title="Modified Dietz return annualized from statement balance history">TWR</th></tr></thead>
+        <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right" title="All-time return reported by brokerage (performance report or statement)">Return</th><th style="text-align:right" title="Annual capital appreciation (return minus income)">Growth/yr</th><th style="text-align:right" title="Modified Dietz return annualized from statement balance history">TWR</th></tr></thead>
         <tbody>{acc_rows}</tbody>
         <tfoot>
-            <tr style="font-weight:700"><td colspan="3">Total Accessible</td><td style="text-align:right">{money(acc_total_balance)}</td><td style="text-align:right"></td><td style="text-align:right">{money(acc_total_income)}</td><td style="text-align:right">{money(acc_total_growth)}</td><td></td></tr>
-            <tr style="color:var(--muted)"><td colspan="7">Monthly Income</td><td style="text-align:right">{money(acc_monthly)}</td></tr>
+            <tr style="font-weight:700"><td colspan="3">Total Accessible</td><td style="text-align:right">{money(acc_total_balance)}</td><td style="text-align:right"></td><td style="text-align:right">{money(acc_total_growth)}</td><td></td></tr>
+            <tr style="color:var(--muted)"><td colspan="6">Monthly Income</td><td style="text-align:right">{money(acc_monthly)}</td></tr>
         </tfoot>
     </table></div>
     {reg_html}
+    {dividend_breakdown_html}
 </section>"""
 
     # ── Tab buttons for conditional tabs ──

@@ -197,6 +197,7 @@ def extract_passive_income(folder: str) -> dict | None:
                 "balance_source": balance_source,
                 "statement_date": statement_date,
                 "balance_history": stmt.get("balance_history", []) if stmt else [],
+                "dividend_history": stmt.get("dividend_history", []) if stmt else [],
             }
 
             # Skip closed accounts with zero balance
@@ -571,8 +572,20 @@ def extract_bank_interest(folder: str, passthrough: list | None = None) -> tuple
                 reader = csv.DictReader(f)
                 if "transaction" not in (reader.fieldnames or []):
                     continue
-                # Derive account name from parent folder
-                account = os.path.basename(os.path.dirname(fpath))
+                # Derive account name from filename prefix (before date)
+                stem = os.path.splitext(fname)[0]
+                # Strip date suffix: "name-2025-01" or "name-2025-01-01"
+                name_m = re.match(r"(.+?)-\d{4}-\d{2}(?:-\d{2})?$", stem)
+                if name_m:
+                    raw = name_m.group(1)
+                    # WS format: "Account Name-monthly-statement-transactions-SUFFIX"
+                    raw = re.sub(r"-monthly-statement-transactions.*", "", raw)
+                    account = raw.replace("-", " ").strip()
+                    # Title-case simple slugs (scotiabank-chequing), leave mixed case as-is
+                    if account == account.lower():
+                        account = account.title()
+                else:
+                    account = os.path.basename(os.path.dirname(fpath))
                 for row in reader:
                     if row["transaction"] != "INT":
                         continue

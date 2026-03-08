@@ -253,7 +253,11 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                 if len(perf_parts) >= 4:
                     perf_suffix = perf_parts[1]
                     perf_date = perf_parts[3] if len(perf_parts) > 3 else ""
-                    ws_perf_pdfs[perf_suffix].append((perf_date, os.path.join(ws_dir, fname)))
+                    perf_path = os.path.join(ws_dir, fname)
+                    ws_perf_pdfs[perf_suffix].append((perf_date, perf_path))
+                    # Also include as a regular statement (these are full
+                    # statements that contain Total Portfolio balance data)
+                    ws_pdfs[perf_suffix].append((perf_date, perf_path))
                 continue
             parts = fname.split("_")
             if len(parts) < 3:
@@ -265,7 +269,8 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
 
     for suffix, files in ws_pdfs.items():
         # Use the most recent statement for balance
-        files.sort(key=lambda x: x[0], reverse=True)
+        # Prefer regular statements over Performance_ files for the same date
+        files.sort(key=lambda x: (x[0], 0 if "Performance_" in x[1] else 1), reverse=True)
         date_seg, pdf_path = files[0]
 
         text = _pdf_text(pdf_path)
@@ -277,10 +282,31 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
             r"Total Portfolio\s+\$([0-9,]+\.\d{2})\s+100\.00\s+\$([0-9,]+\.\d{2})\s+100\.00",
             text,
         )
+        is_savings_fmt = False
         if not m:
-            continue
-        balance = float(m.group(1).replace(",", ""))
-        book_cost = float(m.group(2).replace(",", ""))
+            # Try WS savings statement format: "MON DD BALANCE  $amount"
+            sav_m = re.search(
+                r"[A-Z]{3}\s+\d+\s+BALANCE\s+\$([0-9,]+\.\d{2})", text
+            )
+            if not sav_m:
+                continue
+            is_savings_fmt = True
+            # Closing balance: extract all dollar amounts between BALANCE headers
+            # and the Activity section.  pdftotext -layout puts headers on one
+            # line and values on the next, so the header→value regex misaligns
+            # columns; instead grab the last dollar amount in the summary block.
+            bal_start = text.find("BALANCE")
+            bal_end = text.find("Activity", bal_start) if bal_start >= 0 else -1
+            if bal_start >= 0 and bal_end > bal_start:
+                summary = text[bal_start:bal_end]
+            else:
+                summary = text[bal_start:bal_start + 500] if bal_start >= 0 else ""
+            sav_bals = re.findall(r"\$([0-9,]+\.\d{2})", summary)
+            balance = float(sav_bals[-1].replace(",", "")) if sav_bals else 0.0
+            book_cost = balance
+        else:
+            balance = float(m.group(1).replace(",", ""))
+            book_cost = float(m.group(2).replace(",", ""))
 
         # Handle USD accounts: convert to CAD using statement exchange rate
         is_usd = suffix.upper().endswith("USD")
@@ -324,6 +350,7 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
             "return_source": "estimated",
             "dividends_annual": None,
             "balance_history": [],
+            "dividend_history": [],
         }
 
         # Override return rate from Performance PDF if available
@@ -347,6 +374,26 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
 
         # Parse dividends + interest from ALL monthly statements for this account
         # Also extract balance history (balance, deposits, withdrawals) per month
+        # Pre-compute a fallback FX rate for USD accounts (from any statement with a rate)
+        fallback_fx = None
+        if is_usd:
+            for _, fp2 in files:
+                t2 = _pdf_text(fp2) if fp2 != pdf_path else text
+                fx2 = re.search(r"\$1\s?USD\s*=\s*\$([0-9.]+)\s*CAD", t2) if t2 else None
+                if fx2:
+                    fallback_fx = float(fx2.group(1))
+                    break
+            if fallback_fx is None:
+                # Try other WS accounts for a rate
+                for other_suffix, other_files in ws_pdfs.items():
+                    if other_suffix == suffix:
+                        continue
+                    other_text = _pdf_text(other_files[0][1])
+                    fx2 = re.search(r"\$1\s?USD\s*=\s*\$([0-9.]+)\s*CAD", other_text) if other_text else None
+                    if fx2:
+                        fallback_fx = float(fx2.group(1))
+                        break
+
         total_income = 0.0
         months_seen = set()
         for ds, fp in files:
@@ -356,27 +403,65 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
             # Track unique months
             months_seen.add(ds[:7] if len(ds) >= 7 else ds)
             fx_m = re.search(r"\$1\s?USD\s*=\s*\$([0-9.]+)\s*CAD", pdf_text)
-            stmt_fx = float(fx_m.group(1)) if fx_m else None
+            stmt_fx = float(fx_m.group(1)) if fx_m else fallback_fx
             monthly_income = 0.0
             monthly_income += _parse_cad_usd(
                 r"Dividends\s+\$([\d,]+\.\d{2})(?:\s+\$([\d,]+\.\d{2}))?", pdf_text, stmt_fx)
             monthly_income += _parse_cad_usd(
                 r"Interest Earned\s+\$([\d,]+\.\d{2})(?:\s+\$([\d,]+\.\d{2}))?", pdf_text, stmt_fx)
+            # Savings-format: "Interest earned  $amount" in activity lines (USD)
+            if monthly_income == 0:
+                sav_interest = 0.0
+                for int_m in re.finditer(r"Interest earned\s+\$?([\d,]+\.\d{2})", pdf_text):
+                    val = float(int_m.group(1).replace(",", ""))
+                    if val > 0:
+                        sav_interest += val
+                if sav_interest > 0 and is_usd and stmt_fx:
+                    monthly_income += sav_interest * stmt_fx
+                else:
+                    monthly_income += sav_interest
             total_income += monthly_income
+            month_key = ds[:7] if len(ds) >= 7 else ds
+            results[suffix]["dividend_history"].append({
+                "month": month_key,
+                "amount": round(monthly_income, 2),
+            })
 
             # Extract balance history entry for this month
             bh_m = re.search(
                 r"Total Portfolio\s+\$([0-9,]+\.\d{2})\s+100\.00",
                 pdf_text,
             )
+            hist_bal_raw = None
+            hist_open_raw = None  # opening balance for savings-format
+            is_savings_hist = False
             if bh_m:
-                hist_bal = float(bh_m.group(1).replace(",", ""))
+                hist_bal_raw = float(bh_m.group(1).replace(",", ""))
+            else:
+                # Savings-format: extract closing (and opening) balance
+                # from summary section between BALANCE headers and Activity
+                is_savings_hist = True
+                bh_start = pdf_text.find("BALANCE")
+                bh_end = pdf_text.find("Activity", bh_start) if bh_start >= 0 else -1
+                if bh_start >= 0 and bh_end > bh_start:
+                    bh_summary = pdf_text[bh_start:bh_end]
+                else:
+                    bh_summary = pdf_text[bh_start:bh_start + 500] if bh_start >= 0 else ""
+                bh_amounts = re.findall(r"\$([0-9,]+\.\d{2})", bh_summary)
+                if bh_amounts:
+                    hist_bal_raw = float(bh_amounts[-1].replace(",", ""))
+                    if len(bh_amounts) >= 2:
+                        hist_open_raw = float(bh_amounts[0].replace(",", ""))
+            if hist_bal_raw is not None:
+                hist_bal = hist_bal_raw
+                hist_open = hist_open_raw
                 # USD conversion using this statement's fx rate
                 if is_usd:
-                    hist_fx = re.search(r"\$1\s?USD\s*=\s*\$([0-9.]+)\s*CAD", pdf_text)
-                    if hist_fx:
-                        hist_fx_rate = float(hist_fx.group(1))
+                    hist_fx_rate = stmt_fx
+                    if hist_fx_rate:
                         hist_bal = round(hist_bal * hist_fx_rate, 2)
+                        if hist_open is not None:
+                            hist_open = round(hist_open * hist_fx_rate, 2)
                     else:
                         continue  # Can't convert; skip this month
 
@@ -385,6 +470,15 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                     r"Deposits\s+\$([\d,]+\.\d{2})(?:\s+\$([\d,]+\.\d{2}))?", pdf_text, stmt_fx)
                 hist_wdr = _parse_cad_usd(
                     r"Withdrawals\s+\$([\d,]+\.\d{2})(?:\s+\$([\d,]+\.\d{2}))?", pdf_text, stmt_fx)
+
+                # For savings-format statements that lack Deposits/Withdrawals
+                # lines, derive net flow from opening/closing balance and interest
+                if is_savings_hist and hist_dep == 0 and hist_wdr == 0 and hist_open is not None:
+                    net_flow = hist_bal - hist_open - monthly_income
+                    if net_flow >= 0:
+                        hist_dep = round(net_flow, 2)
+                    else:
+                        hist_wdr = round(-net_flow, 2)
 
                 # Parse statement end date
                 hist_dm = re.search(
@@ -404,8 +498,26 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                 total_income / len(months_seen) * 12, 2
             )
 
-        # Sort balance history chronologically
+        # Sort balance history and dividend history chronologically
         results[suffix]["balance_history"].sort(key=lambda x: x["date"])
+        # Deduplicate balance history: when a savings-format entry (YYYY-MM)
+        # and a _person_ statement entry (YYYY-MM-DD) cover the same month,
+        # keep the _person_ entry which has actual deposit/withdrawal figures.
+        seen_months: dict[str, int] = {}
+        deduped: list[dict] = []
+        for entry in results[suffix]["balance_history"]:
+            month_key = entry["date"][:7]
+            if month_key in seen_months:
+                prev_idx = seen_months[month_key]
+                prev = deduped[prev_idx]
+                # Prefer the entry with a full date (from _person_ statement)
+                if len(entry["date"]) > len(prev["date"]):
+                    deduped[prev_idx] = entry
+            else:
+                seen_months[month_key] = len(deduped)
+                deduped.append(entry)
+        results[suffix]["balance_history"] = deduped
+        results[suffix]["dividend_history"].sort(key=lambda x: x["month"])
 
     # ── Steadyhand (consolidated quarterly PDFs) ────────────────────────────
     sh_dir = os.path.join(stmt_dir, "personal", "Steadyhand")
@@ -554,7 +666,7 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                     if total_dist > 0:
                         results[acct_num]["dividends_annual"] = round(total_dist * 4, 2)
 
-    # ── Scotiabank Chequing (e-statement PDFs) ───────────────────────────
+    # ── Scotiabank (e-statement PDFs) ───────────────────────────────────
     MONTH_NAMES = {
         "january": 1, "february": 2, "march": 3, "april": 4,
         "may": 5, "june": 6, "july": 7, "august": 8,
@@ -564,6 +676,8 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
     }
     for ownership in ["personal", "corporate"]:
         sc_dirs = [
+            os.path.join(stmt_dir, ownership, "Scotiabank"),
+            # Legacy paths
             os.path.join(stmt_dir, ownership, "Scotiabank Chequing"),
             os.path.join(stmt_dir, ownership, "Scotiabank Ken Personal"),
         ]
