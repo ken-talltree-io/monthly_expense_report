@@ -435,9 +435,7 @@ def generate_html(data: dict, ai_html: str | None = None,
         </section>"""
 
     # ── Income vs burn rate (the main story) ──
-    acc_monthly_passive = passive_income["monthly_income"] if passive_income else 0
     registered_monthly = passive_income["registered_monthly"] if passive_income else 0
-    monthly_passive = acc_monthly_passive + registered_monthly
     annual_passive = (passive_income["annual_income"] if passive_income else 0) + (passive_income["registered_annual"] if passive_income else 0)
 
     # Build actual monthly passive income from dividend_history
@@ -450,6 +448,9 @@ def generate_html(data: dict, ai_html: str | None = None,
                     continue
                 for dh in a.get("dividend_history", []):
                     passive_by_month[dh["month"]] += dh["amount"]
+
+    # Monthly passive = average of actual dividends over last 6 months
+    monthly_passive = sum(passive_by_month.get(m, 0) for m in sub_months) / len(sub_months) if sub_months else 0
 
     # Corporate income components — trailing 6-month average (same window as burn rate)
     if corporate_income:
@@ -1321,46 +1322,77 @@ def generate_html(data: dict, ai_html: str | None = None,
     </table></div>
 </section>"""
 
-    # ── Other Income section (e-transfers + bank interest, last 6 months) ──
+    # ── Other Income section (e-transfers + bank interest, last 6 months, columnar) ──
     other_income_section = ""
     sub_months_set = set(sub_months)
-    if incoming_etransfers or bank_interest:
-        other_txns = []
+    if incoming_etransfers or bank_interest or passive_income:
+        # Build source-level monthly totals for columnar display
+        other_sources = {}  # key -> {month: total}
+        other_total = 0
+        other_count = 0
+
+        # Seed rows for all Cash accounts so they always appear
+        if passive_income:
+            for cat in ["accounts", "registered_accounts"]:
+                for a in passive_income.get(cat, []):
+                    if a.get("type") == "Cash":
+                        other_sources[f"Interest: {a['account']}"] = {}
+
         for t in incoming_etransfers:
-            if str(t["date"])[:7] not in sub_months_set:
+            m = str(t["date"])[:7]
+            if m not in sub_months_set:
                 continue
             date_str = str(t["date"])[:10]
             amt_str = f'{t["amount"]:.2f}'
             note = etransfer_in_notes.get((date_str, amt_str), "") if incoming_etransfers else ""
-            other_txns.append((t["date"], "e-Transfer", note, t["amount"]))
+            key = f"e-Transfer: {note}" if note else "e-Transfer"
+            other_sources.setdefault(key, {})
+            other_sources[key][m] = other_sources[key].get(m, 0) + t["amount"]
+            other_total += t["amount"]
+            other_count += 1
         for t in bank_interest:
-            if str(t["date"])[:7] not in sub_months_set:
+            m = str(t["date"])[:7]
+            if m not in sub_months_set:
                 continue
-            other_txns.append((t["date"], "Interest", t["account"], t["amount"]))
-        other_txns.sort(key=lambda x: x[0], reverse=True)
-        other_total = sum(t[3] for t in other_txns)
-        other_count = len(other_txns)
+            key = f"Interest: {t['account']}"
+            other_sources.setdefault(key, {})
+            other_sources[key][m] = other_sources[key].get(m, 0) + t["amount"]
+            other_total += t["amount"]
+            other_count += 1
 
-        def _other_row(t):
-            date_str = str(t[0])[:10]
-            source = t[1]
-            detail = t[2]
-            detail_html = f'<span style="color:var(--muted);font-style:italic">{detail}</span>' if detail else ""
-            return f'<td>{date_str}</td><td>{source}</td><td>{detail_html}</td><td style="text-align:right">{money(t[3])}</td>'
-        # Wrap in list of dicts so month_grouped_rows can process them
-        other_wrapped = [{"date": t[0], "amount": t[3], "_row": t} for t in other_txns]
-        by_month = {}
-        for ow in other_wrapped:
-            m = str(ow["date"])[:7]
-            by_month.setdefault(m, []).append(ow)
+        sorted_sources = sorted(other_sources.items(), key=lambda x: sum(x[1].values()), reverse=True)
+        oi_month_headers = "".join(
+            f"<th class='sub-month-col' style='text-align:right'>{datetime.strptime(m, '%Y-%m').strftime('%b %Y')}</th>"
+            for m in sub_months
+        )
+        # Compute global max for heatmap scale
+        oi_global_max = max(
+            (v for _, mm in sorted_sources for v in mm.values()), default=0
+        )
         other_rows = ""
-        for m in sorted(by_month, reverse=True):
-            month_txns = by_month[m]
-            label = datetime.strptime(m, "%Y-%m").strftime("%b %Y")
-            total = sum(ow["amount"] for ow in month_txns)
-            other_rows += f'<tr class="group-header"><td colspan="3">{label}</td><td style="text-align:right">{money(total)}</td></tr>'
-            for ow in sorted(month_txns, key=lambda x: x["date"], reverse=True):
-                other_rows += f'<tr>{_other_row(ow["_row"])}</tr>'
+        oi_month_totals = [0.0] * len(sub_months)
+        for key, month_map in sorted_sources:
+            cells = ""
+            row_total = 0.0
+            active_months = 0
+            for i, m in enumerate(sub_months):
+                val = month_map.get(m, 0)
+                if val > 0:
+                    row_total += val
+                    oi_month_totals[i] += val
+                    active_months += 1
+                    intensity = (val / oi_global_max) if oi_global_max > 0 else 0
+                    bg = f"rgba(39, 174, 96, {intensity:.2f})"
+                    text_color = "#fff" if intensity > 0.5 else "var(--text)"
+                    cells += f"<td class='sub-month-col' style='text-align:right;background:{bg};color:{text_color}'>{money(val)}</td>"
+                else:
+                    cells += "<td class='sub-month-col' style='text-align:center;color:#ccc'>\u2014</td>"
+            avg = row_total / active_months if active_months else 0
+            other_rows += f"<tr><td>{key}</td><td style='text-align:right'>{money(avg)}</td>{cells}<td style='text-align:right;font-weight:600'>{money(row_total)}</td></tr>"
+
+        oi_grand_total = sum(oi_month_totals)
+        oi_avg = oi_grand_total / len(sub_months) if sub_months else 0
+        oi_footer_cells = "".join(f"<td class='sub-month-col' style='text-align:right'>{money(t)}</td>" for t in oi_month_totals)
 
         other_income_section = f"""
 <section id="other-income" class="card">
@@ -1370,9 +1402,12 @@ def generate_html(data: dict, ai_html: str | None = None,
     </div>
     <p class="section-desc">e-Transfer reimbursements and bank interest (last 6 months) &mdash; {other_count} transactions totalling {money(other_total)}</p>
     {''.join(f'<p style="font-size:0.85em;color:var(--muted);margin:0.3em 0"><em>Adjusted for {money(adj)} pass-through ({desc}): &minus;{money(adj)} in interest excluded</em></p>' for desc, adj in (passthrough_adj or {}).items())}
-    <div class="table-scroll"><table class="data-table table-narrow">
-        <thead><tr><th>Date</th><th>Source</th><th>Detail</th><th style="text-align:right">Amount</th></tr></thead>
+    <div class="table-scroll"><table class="data-table" style="max-width:100%">
+        <thead><tr><th>Source</th><th style="text-align:right">Avg</th>{oi_month_headers}<th style="text-align:right">Total</th></tr></thead>
         <tbody>{other_rows}</tbody>
+        <tfoot>
+            <tr style="font-weight:700"><td>Total</td><td style="text-align:right">{money(oi_avg)}</td>{oi_footer_cells}<td style="text-align:right">{money(oi_grand_total)}</td></tr>
+        </tfoot>
     </table></div>
 </section>"""
 
@@ -1451,68 +1486,52 @@ def generate_html(data: dict, ai_html: str | None = None,
             color = "#27ae60" if ann >= 0 else "#e74c3c"
             return f"<td style='text-align:right;color:{color}'>{ann*100:.1f}%/yr<br><span style='font-size:0.8em;color:var(--muted)'>{pa['data_points']} pts</span></td>"
 
-        # Accessible accounts table rows (sorted by return % desc)
+        # Combined portfolio table — all accounts sorted by TWR desc
         acc_total_balance = passive_income["accessible_balance"]
         acc_total_income = passive_income["annual_income"]
         acc_total_growth = passive_income.get("annual_growth", 0)
         acc_monthly = passive_income["monthly_income"]
-        acc_total_return = acc_total_income + acc_total_growth
 
-        def _sort_return(a):
+        def _sort_twr(a):
             pa = twr_by_account.get(a["account"])
             if pa:
                 return ((1 + pa["monthly_return"]) ** 12 - 1) * 100
             return a["return_pct"]
 
-        acc_sorted = sorted(passive_income["accounts"],
-                            key=_sort_return,
-                            reverse=True)
+        all_accounts = list(passive_income["accounts"])
+        reg_accounts = passive_income.get("registered_accounts", [])
+        if reg_accounts:
+            all_accounts.extend(reg_accounts)
 
-        acc_rows = ""
+        acc_sorted = sorted(all_accounts, key=_sort_twr, reverse=True)
+
+        # Tag each account so we can identify accessible vs registered
+        reg_names = {a["account"] for a in reg_accounts} if reg_accounts else set()
+
+        portfolio_rows = ""
+        total_balance = acc_total_balance + passive_income.get("registered_balance", 0)
+        total_growth = acc_total_growth + passive_income.get("registered_growth", 0)
         for a in acc_sorted:
             has_twr = a["account"] in twr_by_account
-            acc_rows += (
-                f"<tr><td>{a['account']}</td><td>{a.get('brokerage','')}</td><td>{a['type']}</td>"
+            acct_type = a["type"]
+            if a["account"] in reg_names:
+                acct_type += " <span style='font-size:0.75em;color:var(--muted)'>(reg)</span>"
+            portfolio_rows += (
+                f"<tr><td>{a['account']}</td><td>{a.get('brokerage','')}</td><td>{acct_type}</td>"
                 f"{balance_cell(a)}"
                 f"{return_cell(a, has_twr=has_twr)}"
                 f"{growth_cell(a)}"
                 f"{twr_cell(a['account'])}</tr>"
             )
 
-        # Registered accounts table (RRSP + RESP — TFSAs are in Accessible)
-        reg_html = ""
-        if passive_income.get("registered_accounts"):
-            reg_total_return = passive_income['registered_annual'] + passive_income.get('registered_growth', 0)
-
-            reg_sorted = sorted(passive_income["registered_accounts"],
-                                 key=_sort_return,
-                                 reverse=True)
-            reg_rows = ""
-            for a in reg_sorted:
-                has_twr = a["account"] in twr_by_account
-                reg_rows += (
-                    f"<tr><td>{a['account']}</td><td>{a.get('brokerage','')}</td><td>{a['type']}</td>"
-                    f"{balance_cell(a)}"
-                    f"{return_cell(a, has_twr=has_twr)}"
-                    f"{growth_cell(a)}"
-                    f"{twr_cell(a['account'])}</tr>"
-                )
-            reg_html = f"""
-    <h3 style="margin-top:30px">Registered Accounts <span style="font-weight:400;color:var(--muted);font-size:0.85em">(RRSP, RESP — not accessible without tax penalty)</span></h3>
-    <div class="table-scroll"><table class="data-table" style="max-width:100%">
-        <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right" title="All-time return reported by brokerage (performance report or statement)">Return</th><th style="text-align:right" title="Annual capital appreciation (return minus income)">Growth/yr</th><th style="text-align:right" title="Modified Dietz return annualized from statement balance history">TWR</th></tr></thead>
-        <tbody>{reg_rows}</tbody>
-        <tfoot>
-            <tr style="font-weight:700"><td colspan="3">Total Registered</td><td style="text-align:right">{money(passive_income['registered_balance'])}</td><td style="text-align:right"></td><td style="text-align:right">{money(passive_income.get('registered_growth', 0))}</td><td></td></tr>
-            <tr style="color:var(--muted)"><td colspan="6">Monthly Income</td><td style="text-align:right">{money(passive_income['registered_monthly'])}</td></tr>
-        </tfoot>
-    </table></div>"""
-
         portfolio_monthly = acc_monthly + registered_monthly
 
-        # Build monthly dividend breakdown table
+        # Build monthly dividend breakdown table (accounts as rows, months as columns)
+        # Exclude Cash accounts — their interest is in Other Income (bank interest)
         all_div_accounts = []  # [(name, {month: amount})]
         for a in acc_sorted:
+            if a.get("type") == "Cash":
+                continue
             dh = a.get("dividend_history", [])
             monthly_map = {entry["month"]: entry["amount"] for entry in dh}
             has_any_income = any(entry["amount"] > 0 for entry in dh)
@@ -1521,46 +1540,53 @@ def generate_html(data: dict, ai_html: str | None = None,
                 all_div_accounts.append((a["account"], monthly_map))
 
         dividend_breakdown_html = ""
+        div_avg = 0
         if all_div_accounts:
-            all_div_months = sorted(set(m for _, mm in all_div_accounts for m in mm))
-            div_col_headers = "".join(
-                f"<th style='text-align:right'>{name}</th>" for name, _ in all_div_accounts
+            # Sort by 6-month total descending
+            all_div_accounts.sort(
+                key=lambda x: sum(x[1].get(m, 0) for m in sub_months), reverse=True
+            )
+            div_month_headers = "".join(
+                f"<th class='sub-month-col' style='text-align:right'>{datetime.strptime(m, '%Y-%m').strftime('%b %Y')}</th>"
+                for m in sub_months
+            )
+            # Compute global max across all cells for heatmap scale
+            div_global_max = max(
+                (mm.get(m, 0) for _, mm in all_div_accounts for m in sub_months), default=0
             )
             div_rows = ""
-            col_totals = [0.0] * len(all_div_accounts)
-            for month in reversed(all_div_months):
-                label = datetime.strptime(month, "%Y-%m").strftime("%b %Y")
-                row_total = 0.0
+            div_month_totals = [0.0] * len(sub_months)
+            for name, mm in all_div_accounts:
                 cells = ""
-                for i, (_, mm) in enumerate(all_div_accounts):
-                    if month not in mm:
-                        cells += "<td style='text-align:right;color:var(--muted)'>\u2014</td>"
-                    elif mm[month] > 0:
-                        col_totals[i] += mm[month]
-                        row_total += mm[month]
-                        cells += f"<td style='text-align:right'>{money(mm[month])}</td>"
+                row_total = 0.0
+                active_months = 0
+                for i, m in enumerate(sub_months):
+                    val = mm.get(m, 0)
+                    if val > 0:
+                        row_total += val
+                        div_month_totals[i] += val
+                        active_months += 1
+                        intensity = (val / div_global_max) if div_global_max > 0 else 0
+                        bg = f"rgba(39, 174, 96, {intensity:.2f})"
+                        text_color = "#fff" if intensity > 0.5 else "var(--text)"
+                        cells += f"<td class='sub-month-col' style='text-align:right;background:{bg};color:{text_color}'>{money(val)}</td>"
+                    elif m in mm:
+                        cells += "<td class='sub-month-col' style='text-align:right;color:var(--muted)'>$0</td>"
                     else:
-                        cells += "<td style='text-align:right;color:var(--muted)'>$0</td>"
-                div_rows += f"<tr><td>{label}</td>{cells}<td style='text-align:right;font-weight:600'>{money(row_total)}</td></tr>"
+                        cells += "<td class='sub-month-col' style='text-align:center;color:#ccc'>\u2014</td>"
+                avg = row_total / active_months if active_months > 0 else 0
+                div_rows += f"<tr><td>{name}</td>{cells}<td style='text-align:right'>{money(avg)}</td><td style='text-align:right;font-weight:600'>{money(row_total)}</td></tr>"
 
-            grand_total = sum(col_totals)
-            div_footer_cells = "".join(f"<td style='text-align:right'>{money(ct)}</td>" for ct in col_totals)
-            # Per-column averages (divide by months with statements, not total months)
-            col_months = [sum(1 for m in all_div_months if m in mm) for _, mm in all_div_accounts]
-            col_avg_cells = "".join(
-                f"<td style='text-align:right'>{money(col_totals[i] / col_months[i])}</td>" if col_months[i] > 0
-                else "<td></td>"
-                for i in range(len(all_div_accounts))
-            )
-            avg = grand_total / len(all_div_months) if all_div_months else 0
+            div_grand_total = sum(div_month_totals)
+            div_avg = div_grand_total / len(sub_months) if sub_months else 0
+            div_footer_cells = "".join(f"<td class='sub-month-col' style='text-align:right'>{money(t)}</td>" for t in div_month_totals)
             dividend_breakdown_html = f"""
     <h3 style="margin-top:30px">Monthly Dividends</h3>
     <div class="table-scroll"><table class="data-table" style="max-width:100%">
-        <thead><tr><th>Month</th>{div_col_headers}<th style="text-align:right">Total</th></tr></thead>
+        <thead><tr><th>Account</th>{div_month_headers}<th style="text-align:right">Avg</th><th style="text-align:right">Total</th></tr></thead>
         <tbody>{div_rows}</tbody>
         <tfoot>
-            <tr style="font-weight:700"><td>Total</td>{div_footer_cells}<td style="text-align:right">{money(grand_total)}</td></tr>
-            <tr style="color:var(--muted)"><td>Monthly Avg</td>{col_avg_cells}<td style="text-align:right">{money(avg)}</td></tr>
+            <tr style="font-weight:700"><td>Total</td>{div_footer_cells}<td style="text-align:right">{money(div_avg)}</td><td style="text-align:right">{money(div_grand_total)}</td></tr>
         </tfoot>
     </table></div>"""
 
@@ -1568,19 +1594,16 @@ def generate_html(data: dict, ai_html: str | None = None,
 <section id="passive-income" class="card">
     <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap">
         <h2 style="margin-bottom:0">Investment Portfolio</h2>
-        <div style="font-size:1.3em;font-weight:700;color:#27ae60">{money(portfolio_monthly)}<span style="font-size:0.55em;font-weight:400;color:var(--muted)">/mo income</span></div>
+        <div style="font-size:1.3em;font-weight:700;color:#27ae60">{money(div_avg)}<span style="font-size:0.55em;font-weight:400;color:var(--muted)">/mo income</span></div>
     </div>
-    <p class="section-desc">Yield and growth from personal investment accounts — accessible and registered holdings</p>
-    <h3>Accessible Accounts</h3>
+    <p class="section-desc">Yield and growth from personal investment accounts — sorted by TWR. Registered accounts marked <span style="color:var(--muted)">(reg)</span>.</p>
     <div class="table-scroll"><table class="data-table" style="max-width:100%">
         <thead><tr><th>Account</th><th>Brokerage</th><th>Type</th><th style="text-align:right">Balance</th><th style="text-align:right" title="All-time return reported by brokerage (performance report or statement)">Return</th><th style="text-align:right" title="Annual capital appreciation (return minus income)">Growth/yr</th><th style="text-align:right" title="Modified Dietz return annualized from statement balance history">TWR</th></tr></thead>
-        <tbody>{acc_rows}</tbody>
+        <tbody>{portfolio_rows}</tbody>
         <tfoot>
-            <tr style="font-weight:700"><td colspan="3">Total Accessible</td><td style="text-align:right">{money(acc_total_balance)}</td><td style="text-align:right"></td><td style="text-align:right">{money(acc_total_growth)}</td><td></td></tr>
-            <tr style="color:var(--muted)"><td colspan="6">Monthly Income</td><td style="text-align:right">{money(acc_monthly)}</td></tr>
+            <tr style="font-weight:700"><td colspan="3">Total Portfolio</td><td style="text-align:right">{money(total_balance)}</td><td style="text-align:right"></td><td style="text-align:right">{money(total_growth)}</td><td></td></tr>
         </tfoot>
     </table></div>
-    {reg_html}
     {dividend_breakdown_html}
 </section>"""
 
