@@ -2044,27 +2044,38 @@ class TestModifiedDietz:
         ann = (1 + pa["monthly_return"]) ** 12 - 1
         assert ann == pytest.approx(0.1268, abs=0.01)  # ~1%/mo compounded
 
-    def test_large_inflow_handled(self):
-        """Large deposit relative to starting balance doesn't distort return."""
+    def test_large_inflow_skipped(self):
+        """Large deposit (>50% of B0) is skipped by flow guard."""
         acct = self._acct("Funded", [
             self._hist("2025-01-31", 5000),
             self._hist("2025-04-30", 255000, deposits=250000),
             self._hist("2025-07-31", 257000),
             self._hist("2025-10-31", 259000),
         ])
+        # Only 2 clean periods after skipping large inflow → below 3-period minimum
+        result = compute_modified_dietz(self._make_passive([acct]))
+        assert result is None
+
+    def test_moderate_flow_handled(self):
+        """Moderate flows (<50% of B0) produce reasonable returns."""
+        acct = self._acct("Moderate", [
+            self._hist("2025-01-31", 100000),
+            self._hist("2025-02-28", 131000, deposits=30000),
+            self._hist("2025-03-31", 132000),
+            self._hist("2025-04-30", 133000),
+        ])
         result = compute_modified_dietz(self._make_passive([acct]))
         pa = result["per_account"][0]
         ann = (1 + pa["monthly_return"]) ** 12 - 1
-        # Should be a modest return, not inflated by the large deposit
-        assert ann < 0.10  # less than 10%
+        assert ann > 0 and ann < 0.20  # modest positive return
 
     def test_withdrawal_handled(self):
-        """Withdrawals don't distort return calculation."""
+        """Moderate withdrawals don't distort return calculation."""
         acct = self._acct("Withdrawing", [
             self._hist("2025-01-31", 100000),
-            self._hist("2025-04-30", 52000, withdrawals=50000),
-            self._hist("2025-07-31", 53000),
-            self._hist("2025-10-31", 54000),
+            self._hist("2025-04-30", 72000, withdrawals=30000),
+            self._hist("2025-07-31", 73000),
+            self._hist("2025-10-31", 74000),
         ])
         result = compute_modified_dietz(self._make_passive([acct]))
         pa = result["per_account"][0]

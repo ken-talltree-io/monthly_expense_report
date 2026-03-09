@@ -1982,7 +1982,7 @@ def main():
     passive_income = extract_passive_income(folder)
     if passive_income:
         print(f"Portfolio passive income: ${passive_income['annual_income']:,.2f}/year (${passive_income['monthly_income']:,.2f}/month) from {len(passive_income['accounts'])} accounts")
-        twr_result = compute_modified_dietz(passive_income)
+        twr_result = compute_modified_dietz(passive_income, passthrough=passthrough)
         if twr_result:
             passive_income["twr"] = twr_result
             print(f"TWR: {twr_result['monthly_growth_rate']*100:.3f}%/mo ({twr_result['annualized_rate']*100:.1f}%/yr, {twr_result['data_points']} data points, {twr_result['date_range'][0]} to {twr_result['date_range'][1]})")

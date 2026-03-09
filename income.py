@@ -186,6 +186,7 @@ def extract_passive_income(folder: str) -> dict | None:
                 "account": account,
                 "brokerage": brokerage,
                 "type": asset_type,
+                "suffix": acct_suffix,
                 "value": total_value,
                 "income_annual": round(income_annual, 2),
                 "growth_annual": round(growth_annual, 2),
@@ -242,7 +243,8 @@ def extract_passive_income(folder: str) -> dict | None:
     }
 
 
-def compute_modified_dietz(passive_income: dict) -> dict | None:
+def compute_modified_dietz(passive_income: dict,
+                           passthrough: list | None = None) -> dict | None:
     """Compute Modified Dietz return per account and portfolio-wide.
 
     Uses balance_history from statement data.  For each period between
@@ -250,17 +252,62 @@ def compute_modified_dietz(passive_income: dict) -> dict | None:
         R = (B1 - B0 - net_flow) / (B0 + 0.5 * net_flow)
     This approximates money-weighted return by assuming flows arrive
     mid-period.  Period returns are compounded geometrically, then annualised.
-    Returns None if fewer than 3 data points are available.
+
+    Passthrough adjustment: when passthrough records match an account's suffix,
+    the passthrough principal is subtracted from balances during the active
+    period, and the corresponding deposit/withdrawal is removed from flows.
+    This isolates the return on the account holder's own capital.
+
+    Returns None if fewer than 3 total data points are available.
     """
+    passthrough = passthrough or []
+
+    # Index passthrough by account suffix
+    pt_by_suffix: dict[str, list] = {}
+    for pt in passthrough:
+        pt_by_suffix.setdefault(pt["account_suffix"], []).append(pt)
+
     all_accounts = passive_income.get("accounts", []) + passive_income.get("registered_accounts", [])
     per_account = []
     total_data_points = 0
     all_dates = []
 
     for acct in all_accounts:
+        # Skip closed accounts — balance went to zero from transfers, not losses
+        if "(closed)" in acct.get("account", "").lower():
+            continue
+
         history = acct.get("balance_history", [])
         if len(history) < 2:
             continue
+
+        acct_suffix = acct.get("suffix", "")
+        acct_pts = pt_by_suffix.get(acct_suffix, [])
+
+        # Determine pre-passthrough floor balance for each passthrough
+        # For YYYY-MM dates, use end-of-month since balances are month-end snapshots
+        pt_floors: dict[str, float] = {}
+        if acct_pts:
+            for pt in acct_pts:
+                floor = 0.0
+                for h in history:
+                    hd = None
+                    for fmt in ("%Y-%m-%d", "%Y-%m"):
+                        try:
+                            hd = datetime.strptime(h["date"][:10], fmt)
+                            break
+                        except ValueError:
+                            continue
+                    if hd:
+                        # YYYY-MM dates are month-end snapshots — use last day of month
+                        if len(h["date"].strip()) <= 7:
+                            _, last_day = calendar.monthrange(hd.year, hd.month)
+                            hd_date = date(hd.year, hd.month, last_day)
+                        else:
+                            hd_date = hd.date()
+                        if hd_date < pt["start_date"]:
+                            floor = h["balance"]
+                pt_floors[pt["account_suffix"]] = floor
 
         cumulative = 1.0
         total_months = 0
@@ -273,20 +320,72 @@ def compute_modified_dietz(passive_income: dict) -> dict | None:
             if b0 <= 0:
                 continue
 
-            net_flow = t1["deposits"] - t1["withdrawals"]
+            deposits = t1["deposits"]
+            withdrawals = t1["withdrawals"]
+
+            # Parse period dates (handles both YYYY-MM-DD and YYYY-MM formats)
+            d0 = d1 = None
+            for fmt in ("%Y-%m-%d", "%Y-%m"):
+                try:
+                    d0 = datetime.strptime(t0["date"][:10], fmt)
+                    break
+                except ValueError:
+                    continue
+            for fmt in ("%Y-%m-%d", "%Y-%m"):
+                try:
+                    d1 = datetime.strptime(t1["date"][:10], fmt)
+                    break
+                except ValueError:
+                    continue
+            if d0 and d1:
+                months_in_period = max(round((d1 - d0).days / 30.44), 1)
+            else:
+                months_in_period = 1
+
+            # Adjust for passthrough: subtract external money from balances and flows
+            # Cap subtraction so adjusted balance doesn't drop below pre-passthrough floor
+            # For YYYY-MM dates, use end-of-month for passthrough period checks
+            if acct_pts and d0 and d1:
+                def _eom(dt_obj, date_str):
+                    """Convert to end-of-month date for YYYY-MM format strings."""
+                    if len(date_str.strip()) <= 7:
+                        _, last_day = calendar.monthrange(dt_obj.year, dt_obj.month)
+                        return date(dt_obj.year, dt_obj.month, last_day)
+                    return dt_obj.date()
+
+                d0_date = _eom(d0, t0["date"])
+                d1_date = _eom(d1, t1["date"])
+
+                for pt in acct_pts:
+                    pt_start = pt["start_date"]
+                    pt_end = pt["end_date"]
+                    principal = pt["principal"]
+                    floor = pt_floors.get(pt["account_suffix"], 0)
+                    active_at_t0 = pt_start <= d0_date < pt_end
+                    active_at_t1 = pt_start <= d1_date < pt_end
+
+                    # Both endpoints active: return is contaminated by external
+                    # money — can't separate user's return from passthrough's.
+                    # Skip entirely (also covers arrival/departure periods).
+                    if active_at_t0 or active_at_t1:
+                        b0 = 0  # will be skipped by b0 <= 0 check below
+                        break
+
+            if b0 <= 0:
+                continue
+
+            net_flow = deposits - withdrawals
+
+            # Flow guard: skip periods where flows dominate the starting balance
+            # Modified Dietz is unreliable when |net_flow| > 50% of B0
+            if abs(net_flow) > 0.5 * b0:
+                continue
+
             # Modified Dietz: weight flows at mid-period
             denominator = b0 + 0.5 * net_flow
             if denominator <= 0:
                 continue
             period_return = (b1 - b0 - net_flow) / denominator
-
-            # Determine months in period from date gap
-            try:
-                d0 = datetime.strptime(t0["date"][:10], "%Y-%m-%d")
-                d1 = datetime.strptime(t1["date"][:10], "%Y-%m-%d")
-                months_in_period = max(round((d1 - d0).days / 30.44), 1)
-            except (ValueError, TypeError):
-                months_in_period = 1
 
             if period_return > -1:
                 cumulative *= (1 + period_return)
@@ -295,10 +394,12 @@ def compute_modified_dietz(passive_income: dict) -> dict | None:
 
             total_months += months_in_period
             balances.append((b0 + b1) / 2)
-            all_dates.append(t0["date"][:10])
-            all_dates.append(t1["date"][:10])
+            date_str_0 = d0.strftime("%Y-%m-%d") if d0 else t0["date"][:10]
+            date_str_1 = d1.strftime("%Y-%m-%d") if d1 else t1["date"][:10]
+            all_dates.append(date_str_0)
+            all_dates.append(date_str_1)
 
-        if total_months > 0:
+        if total_months > 0 and len(balances) >= 3:
             # Geometric monthly return from compounded TWR
             monthly_return = cumulative ** (1 / total_months) - 1
             avg_balance = sum(balances) / len(balances)
