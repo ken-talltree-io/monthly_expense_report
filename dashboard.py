@@ -15,16 +15,11 @@ import csv
 import json
 import os
 from collections import defaultdict, OrderedDict
-from datetime import datetime, timedelta
+from datetime import datetime
 
 import config
 from config import (
     CATEGORY_CONSOLIDATION,
-    CORPORATE_TAKE_HOME_RATE,
-    DEBT_PAYOFF_THRESHOLDS,
-    INTEREST_RATES,
-    CASHBACK_RATE,
-    SUSTAINABILITY_PROJECTION_MONTHS,
     load_budgets,
     load_notes,
     load_user_categories,
@@ -41,6 +36,7 @@ from income import (
     load_liabilities,
 )
 from analysis import analyze, get_ai_recommendations
+from metrics import compute_all_metrics
 
 
 # ── HTML Generation ──────────────────────────────────────────────────────────
@@ -55,8 +51,11 @@ def generate_html(data: dict, ai_html: str | None = None,
                    folder: str = ".") -> str:
     notes = notes or {}
     budgets = budgets or {}
-    months = data["months"][-12:]  # Cap display window to last 12 months
-    month_labels = [datetime.strptime(m, "%Y-%m").strftime("%b %Y") for m in months]
+
+    met = compute_all_metrics(data, passive_income, corporate_income,
+                              incoming_etransfers, bank_interest)
+    months = met.months
+    month_labels = met.month_labels
 
     # Color palette
     COLORS = [
@@ -102,80 +101,53 @@ def generate_html(data: dict, ai_html: str | None = None,
     def month_grouped_rows(txns, render_row, colspan=2):
         by_month = {}
         for t in txns:
-            m = str(t["date"])[:7]
+            m = str(t.date)[:7]
             by_month.setdefault(m, []).append(t)
         rows = ""
         for m in sorted(by_month, reverse=True):
             month_txns = by_month[m]
             label = datetime.strptime(m, "%Y-%m").strftime("%b %Y")
-            total = sum(t["amount"] for t in month_txns)
+            total = sum(t.amount for t in month_txns)
             rows += f'<tr class="group-header"><td colspan="{colspan}">{label}</td><td style="text-align:right">{money(total)}</td></tr>'
-            for t in sorted(month_txns, key=lambda x: x["date"], reverse=True):
+            for t in sorted(month_txns, key=lambda x: x.date, reverse=True):
                 rows += f'<tr>{render_row(t)}</tr>'
         return rows
 
-    # ── Data preparation ──
-    source_breakdown = data.get("source_breakdown", {})
-
-    # Fixed costs data
+    # ── Data preparation (from metrics) ──
     fixed_detail = data.get("fixed_cost_detail", [])
     fixed_total = data.get("fixed_total", 0)
     discretionary_total = data.get("discretionary_total", 0)
-    fixed_pct = round(fixed_total / data["total"] * 100, 1) if data["total"] > 0 else 0
-
-    # Transfers data
+    fixed_pct = met.fixed_pct
     transfers = data.get("transfers", {})
-
-    # Debt payoff data
     debt_payoffs = data.get("debt_payoffs", [])
-    debt_payoff_total = sum(d["amount"] for d in debt_payoffs)
-    annual_interest_saved = sum(
-        d["amount"] * INTEREST_RATES.get(d["merchant"], 0) for d in debt_payoffs
-    )
-
-    # Adjusted totals — exclude paid-off debt merchant payments consistently
-    debt_merchants = set(DEBT_PAYOFF_THRESHOLDS.keys()) if debt_payoffs else set()
-    adjusted_monthly = {}
-    for m in months:
-        m_total = data["monthly_totals"].get(m, 0)
-        if debt_merchants:
-            debt_in_month = sum(t["amount"] for t in data["monthly_txns"].get(m, [])
-                                if t["merchant"] in debt_merchants)
-            m_total -= debt_in_month
-        adjusted_monthly[m] = m_total
-
-    # Apply VISA cash-back reduction to credit card spend
-    credit_by_month = source_breakdown.get("credit", {})
-    cashback_monthly = {m: round(credit_by_month.get(m, 0) * CASHBACK_RATE, 2) for m in months}
-    cashback_total = sum(cashback_monthly.values())
-    for m in months:
-        adjusted_monthly[m] -= cashback_monthly[m]
-
-    adjusted_total = sum(adjusted_monthly.values())
-    adjusted_avg = adjusted_total / len(months) if months else 0
-
-    # Burn rate — recent 6-month trailing average
-    recent_months = months[-6:]
-    burn_rate = sum(adjusted_monthly[m] for m in recent_months) / len(recent_months) if recent_months else 0
+    debt_payoff_total = met.debt_payoff_total
+    annual_interest_saved = met.annual_interest_saved
+    adjusted_monthly = met.adjusted_monthly
+    cashback_monthly = met.cashback_monthly
+    cashback_total = met.cashback_total
+    adjusted_total = met.adjusted_total
+    adjusted_avg = met.adjusted_avg
+    recent_months = met.recent_months
+    burn_rate = met.burn_rate
 
     # ── Build table rows ──
 
     # Sub months (last 6 only) and headers
-    sub_months = months[-6:]
+    sub_months = met.sub_months
     sub_month_headers = "".join(f"<th class='sub-month-col' style='text-align:right'>{datetime.strptime(m, '%Y-%m').strftime('%b %Y')}</th>" for m in sub_months)
 
     # Subscription table rows — grouped by status
     sub_by_status = defaultdict(list)
     for s in data["subscriptions"]:
-        sub_by_status[s["status"]].append(s)
+        sub_by_status[s.status].append(s)
 
     status_order = ["new", "price_change", "stopped", "stable"]
     status_labels = {"stable": "Stable", "price_change": "Price Change", "new": "New", "stopped": "Stopped"}
 
     # Compute visible (6-month) averages for subscriptions
     def _visible_avg(s):
-        amounts = [s["history"].get(m, 0) for m in sub_months if s["history"].get(m, 0) > 0]
-        return sum(amounts) / len(amounts) if amounts else s["avg"]
+        amounts = [s.history.get(m, 0) for m in sub_months if s.history.get(m, 0) > 0]
+        return sum(amounts) / len(amounts) if amounts else s.avg
 
     sub_rows = ""
     total_monthly = sum(_visible_avg(s) for s in data["subscriptions"])
@@ -191,16 +163,16 @@ def generate_html(data: dict, ai_html: str | None = None,
             v_avg = _visible_avg(s)
             month_cells = ""
             for m in sub_months:
-                val = s["history"].get(m, 0)
+                val = s.history.get(m, 0)
                 if val > 0:
                     month_cells += f"<td class='sub-month-col' style='text-align:right'>{money(val)}</td>"
                 else:
                     month_cells += "<td class='sub-month-col' style='text-align:center;color:#ccc'>—</td>"
-            alert_html = "<br>".join(f"<small style='color:#e74c3c'>{a}</small>" for a in s["alerts"]) if s["alerts"] else ""
-            note = notes.get(s["merchant"].lower(), "")
+            alert_html = "<br>".join(f"<small style='color:#e74c3c'>{a}</small>" for a in s.alerts) if s.alerts else ""
+            note = notes.get(s.merchant.lower(), "")
             note_html = f"<br><small style='color:#4e79a7;font-style:italic'>Note: {note}</small>" if note else ""
             sub_rows += f"""<tr>
-            <td><strong>{s['merchant']}</strong>{('<br>' + alert_html) if alert_html else ''}{note_html}</td>
+            <td><strong>{s.merchant}</strong>{('<br>' + alert_html) if alert_html else ''}{note_html}</td>
             <td style="text-align:right">{money(v_avg)}</td>
             {month_cells}
         </tr>"""
@@ -230,10 +202,10 @@ def generate_html(data: dict, ai_html: str | None = None,
 
     # Interac e-Transfer detail table (last 6 months, grouped by month, sorted by date)
     etransfer_txns = sorted(
-        [t for txns in data["monthly_txns"].values() for t in txns if t["merchant"] == "Interac e-Transfer" and str(t["date"])[:7] in set(sub_months)],
-        key=lambda t: t["date"], reverse=True
+        [t for txns in data["monthly_txns"].values() for t in txns if t.merchant == "Interac e-Transfer" and str(t.date)[:7] in set(sub_months)],
+        key=lambda t: t.date, reverse=True
     )
-    etransfer_total = sum(t["amount"] for t in etransfer_txns)
+    etransfer_total = sum(t.amount for t in etransfer_txns)
     # Load e-transfer annotations (date+amount -> note)
     etransfer_notes = {}
     notes_path = os.path.join(folder, "etransfer-notes.csv")
@@ -245,11 +217,11 @@ def generate_html(data: dict, ai_html: str | None = None,
                 if row.get("note", "").strip():
                     etransfer_notes[key] = row["note"].strip()
     def _etransfer_out_row(t):
-        date_str = str(t["date"])[:10]
-        amt_str = f'{t["amount"]:.2f}'
+        date_str = str(t.date)[:10]
+        amt_str = f'{t.amount:.2f}'
         note = etransfer_notes.get((date_str, amt_str), "")
         note_html = f'<span style="color:var(--muted);font-style:italic">{note}</span>' if note else ""
-        return f'<td>{date_str}</td><td>{note_html}</td><td style="text-align:right">{money(t["amount"])}</td>'
+        return f'<td>{date_str}</td><td>{note_html}</td><td style="text-align:right">{money(t.amount)}</td>'
     etransfer_rows = month_grouped_rows(etransfer_txns, _etransfer_out_row)
 
     # Category heatmap (last 6 months)
@@ -272,7 +244,7 @@ def generate_html(data: dict, ai_html: str | None = None,
     heatmap_txns_by_cat = defaultdict(list)
     for m in heatmap_months:
         for t in data["monthly_txns"].get(m, []):
-            heatmap_txns_by_cat[t["category"]].append(t)
+            heatmap_txns_by_cat[t.category].append(t)
 
     # ── Anomalies grouped by category (for heatmap integration) ──
     anomalies = data.get("anomalies", [])
@@ -307,9 +279,9 @@ def generate_html(data: dict, ai_html: str | None = None,
         cat_txns = heatmap_txns_by_cat.get(c, [])
         merchant_totals = defaultdict(float)
         for tx in cat_txns:
-            merchant_totals[tx["merchant"]] += tx["amount"]
+            merchant_totals[tx.merchant] += tx.amount
         top_merchants = sorted(merchant_totals.items(), key=lambda x: x[1], reverse=True)[:5]
-        top_txns = sorted(cat_txns, key=lambda x: x["amount"], reverse=True)[:5]
+        top_txns = sorted(cat_txns, key=lambda x: x.amount, reverse=True)[:5]
 
         merchant_rows = ""
         for merch_name, merch_total in top_merchants:
@@ -317,8 +289,8 @@ def generate_html(data: dict, ai_html: str | None = None,
             if merch_name == "Interac e-Transfer":
                 et_notes_list = []
                 for tx in cat_txns:
-                    if tx["merchant"] == "Interac e-Transfer":
-                        et_n = etransfer_notes.get((str(tx['date'])[:10], f'{tx["amount"]:.2f}'), "")
+                    if tx.merchant == "Interac e-Transfer":
+                        et_n = etransfer_notes.get((str(tx.date)[:10], f'{tx.amount:.2f}'), "")
                         if et_n and et_n not in et_notes_list:
                             et_notes_list.append(et_n)
                 if et_notes_list:
@@ -327,12 +299,12 @@ def generate_html(data: dict, ai_html: str | None = None,
             merchant_rows += f"<tr><td>{merch_label}</td><td style='text-align:right'>{money(merch_total)}</td></tr>"
         txn_rows = ""
         for tx in top_txns:
-            tx_label = tx['merchant']
-            if tx['merchant'] == "Interac e-Transfer":
-                et_note = etransfer_notes.get((str(tx['date'])[:10], f'{tx["amount"]:.2f}'), "")
+            tx_label = tx.merchant
+            if tx.merchant == "Interac e-Transfer":
+                et_note = etransfer_notes.get((str(tx.date)[:10], f'{tx.amount:.2f}'), "")
                 if et_note:
                     tx_label += f'<br><span style="color:var(--muted);font-style:italic;font-size:0.85em">{et_note}</span>'
-            txn_rows += f"<tr><td>{tx_label}</td><td style='text-align:center'>{tx['date'].strftime('%b %d')}</td><td style='text-align:right'>{money(tx['amount'])}</td></tr>"
+            txn_rows += f"<tr><td>{tx_label}</td><td style='text-align:center'>{tx.date.strftime('%b %d')}</td><td style='text-align:right'>{money(tx.amount)}</td></tr>"
 
         # Anomaly badges for this category
         cat_anomalies = anomalies_by_cat.get(c, [])
@@ -410,20 +382,13 @@ def generate_html(data: dict, ai_html: str | None = None,
     num_months = len(months)
 
     # Fixed vs discretionary per-month data (last 6 months) for stacked bar chart
-    fixed_disc_months = months[-6:]
-    fixed_disc_labels = json.dumps([datetime.strptime(m, "%Y-%m").strftime("%b") for m in fixed_disc_months])
-    fixed_per_month = []
-    disc_per_month = []
-    for m in fixed_disc_months:
-        fixed_m = data.get("fixed_costs", {}).get(m, 0)
-        total_m = data["monthly_totals"].get(m, 0)
-        disc_m = total_m - fixed_m
-        fixed_per_month.append(round(fixed_m, 2))
-        disc_per_month.append(round(max(disc_m, 0), 2))
+    fixed_disc_labels = json.dumps(met.fixed_disc_labels)
+    fixed_per_month = met.fixed_per_month
+    disc_per_month = met.disc_per_month
     fixed_per_month_json = json.dumps(fixed_per_month)
     disc_per_month_json = json.dumps(disc_per_month)
-    fixed_avg = sum(fixed_per_month) / len(fixed_per_month) if fixed_per_month else 0
-    disc_avg = sum(disc_per_month) / len(disc_per_month) if disc_per_month else 0
+    fixed_avg = met.fixed_avg
+    disc_avg = met.disc_avg
 
     # AI section
     ai_section = ""
@@ -434,87 +399,27 @@ def generate_html(data: dict, ai_html: str | None = None,
             <div class="ai-recommendations">{ai_html}</div>
         </section>"""
 
-    # ── Income vs burn rate (the main story) ──
-    registered_monthly = passive_income["registered_monthly"] if passive_income else 0
-    annual_passive = (passive_income["annual_income"] if passive_income else 0) + (passive_income["registered_annual"] if passive_income else 0)
-
-    # Build actual monthly passive income from dividend_history
-    # Exclude Cash accounts — their interest is already in bank_int_by_month from CSV INT rows
-    passive_by_month: dict[str, float] = defaultdict(float)
-    if passive_income:
-        for cat in ["accounts", "registered_accounts"]:
-            for a in passive_income.get(cat, []):
-                if a.get("type") == "Cash":
-                    continue
-                for dh in a.get("dividend_history", []):
-                    passive_by_month[dh["month"]] += dh["amount"]
-
-    # Monthly passive = average of actual dividends over last 6 months
-    monthly_passive = sum(passive_by_month.get(m, 0) for m in sub_months) / len(sub_months) if sub_months else 0
-
-    # Corporate income components — trailing 6-month average (same window as burn rate)
-    if corporate_income:
-        corp_months_all = sorted(set(
-            list(corporate_income["revenue_monthly"].keys()) +
-            list(corporate_income["dividends_monthly"].keys())
-        ))
-        corp_trailing = corp_months_all[-6:]  # last 6 months
-        corp_trailing_n = len(corp_trailing)
-        corp_revenue_avg = round(sum(corporate_income["revenue_monthly"].get(m, 0) for m in corp_trailing) / corp_trailing_n, 2) if corp_trailing_n else 0
-        corp_div_avg = round(sum(corporate_income["dividends_monthly"].get(m, 0) for m in corp_trailing) / corp_trailing_n, 2) if corp_trailing_n else 0
-    else:
-        corp_months_all = []
-        corp_trailing = []
-        corp_trailing_n = 0
-        corp_revenue_avg = 0
-        corp_div_avg = 0
-
-    corp_revenue_takehome = round(corp_revenue_avg * CORPORATE_TAKE_HOME_RATE, 2)
-    corp_monthly_takehome = corp_revenue_takehome + corp_div_avg
-
-    # Other actual income — monthly averages over trailing 6 months
-    recent_months_set = set(recent_months)
-    etransfer_in_monthly_avg = round(sum(t["amount"] for t in (incoming_etransfers or []) if str(t["date"])[:7] in recent_months_set) / len(recent_months), 2) if recent_months else 0
-    bank_interest_monthly_avg = round(sum(t["amount"] for t in (bank_interest or []) if str(t["date"])[:7] in recent_months_set) / len(recent_months), 2) if recent_months else 0
-    other_income_monthly = etransfer_in_monthly_avg + bank_interest_monthly_avg
-
-    combined_monthly = monthly_passive + corp_monthly_takehome + other_income_monthly
-    has_income = passive_income or corporate_income or incoming_etransfers or bank_interest
-
-    # ── Per-month income totals (for savings rate) ──
-    income_by_month = {}
-    # Bucket e-transfers by month
-    etransfer_by_month = defaultdict(float)
-    for t in (incoming_etransfers or []):
-        m_key = str(t["date"])[:7]
-        etransfer_by_month[m_key] += t["amount"]
-    # Bucket bank interest by month
-    bank_int_by_month = defaultdict(float)
-    for t in (bank_interest or []):
-        m_key = str(t["date"])[:7]
-        bank_int_by_month[m_key] += t["amount"]
-    for m in months:
-        corp_rev = corporate_income["revenue_monthly"].get(m, 0) * CORPORATE_TAKE_HOME_RATE if corporate_income else 0
-        corp_div = corporate_income["dividends_monthly"].get(m, 0) if corporate_income else 0
-        passive_m = passive_by_month.get(m, monthly_passive)  # actual dividends, fallback to average
-        etransfer_m = etransfer_by_month.get(m, 0)
-        bank_int_m = bank_int_by_month.get(m, 0)
-        income_by_month[m] = corp_rev + corp_div + passive_m + etransfer_m + bank_int_m
-
-    # ── Savings rate per month ──
-    savings_rate_by_month = {}
-    savings_dollars_by_month = {}
-    for m in months:
-        inc = income_by_month[m]
-        spend = adjusted_monthly[m]
-        savings = inc - spend
-        savings_dollars_by_month[m] = savings
-        savings_rate_by_month[m] = round((savings / inc * 100), 1) if inc > 0 else 0
-
-    savings_rates_list = [savings_rate_by_month[m] for m in months]
-    trailing_3_rates = savings_rates_list[-3:]
-    savings_3mo_avg = round(sum(trailing_3_rates) / len(trailing_3_rates), 1) if trailing_3_rates else 0
-    savings_current = savings_rates_list[-1] if savings_rates_list else 0
+    # ── Income & savings (from metrics) ──
+    registered_monthly = met.registered_monthly
+    monthly_passive = met.monthly_passive
+    annual_passive = met.annual_passive
+    passive_by_month = met.passive_by_month
+    corp_revenue_avg = met.corp_revenue_avg
+    corp_div_avg = met.corp_div_avg
+    corp_revenue_takehome = met.corp_revenue_takehome
+    corp_monthly_takehome = met.corp_monthly_takehome
+    corp_trailing_n = met.corp_trailing_n
+    etransfer_in_monthly_avg = met.etransfer_in_monthly_avg
+    bank_interest_monthly_avg = met.bank_interest_monthly_avg
+    other_income_monthly = met.other_income_monthly
+    combined_monthly = met.combined_monthly
+    has_income = met.has_income
+    income_by_month = met.income_by_month
+    savings_rate_by_month = met.savings_rate_by_month
+    savings_dollars_by_month = met.savings_dollars_by_month
+    savings_rates_list = met.savings_rates_list
+    savings_3mo_avg = met.savings_3mo_avg
+    savings_current = met.savings_current
 
     # ── Savings rate section HTML ──
     def _sr_color(rate):
@@ -610,27 +515,14 @@ def generate_html(data: dict, ai_html: str | None = None,
     else:
         savings_rate_chart_js = ""
 
-    # Combined sustainability metrics (passive + corporate income vs burn rate)
-    if combined_monthly > 0 and burn_rate > 0:
-        coverage_pct = combined_monthly / burn_rate * 100
-        sustainability_gap = combined_monthly - burn_rate
-        if coverage_pct >= 100:
-            coverage_color = "#27ae60"
-            coverage_label = f"Surplus: {money(sustainability_gap)}/mo"
-        elif coverage_pct >= 50:
-            coverage_color = "#f39c12"
-            coverage_label = f"Gap: {money(abs(sustainability_gap))}/mo to sustainability"
-        else:
-            coverage_color = "#e74c3c"
-            coverage_label = f"Gap: {money(abs(sustainability_gap))}/mo to sustainability"
-    else:
-        coverage_pct = 0
-        coverage_color = "#95a5a6"
-        coverage_label = ""
+    # Sustainability (from metrics)
+    coverage_pct = met.coverage_pct
+    coverage_color = met.coverage_color
+    coverage_label = met.coverage_label
+    accessible_balance = met.accessible_balance
 
     # Hero card: passive income vs burn rate
     hero_card = ""
-    accessible_balance = passive_income.get("accessible_balance", 0) if passive_income else 0
     if has_income:
         bar_fill = min(coverage_pct, 100)
         # Savings runway line
@@ -692,88 +584,25 @@ def generate_html(data: dict, ai_html: str | None = None,
         </div>
     </div>"""
 
-    # ── Sustainability Projection ──
+    # ── Sustainability Projection (from metrics) ──
     sustainability_card = ""
     sustainability_chart_js = ""
-    if passive_income and accessible_balance > 0 and burn_rate > 0:
-        annual_income_proj = passive_income["annual_income"]
-        annual_growth_proj = passive_income.get("annual_growth", 0)
-        annual_yield_rate = annual_income_proj / accessible_balance if accessible_balance else 0
-        annual_total_return_rate = (annual_income_proj + annual_growth_proj) / accessible_balance if accessible_balance else 0
-        monthly_yield_rate = annual_yield_rate / 12
-
-        # Use TWR if available (>= 3 data points), else fall back to CSV rates
-        twr = passive_income.get("twr")
-        if twr and twr["data_points"] >= 3:
-            monthly_total_return_rate = twr["monthly_growth_rate"]
-            twr_annualized = twr["annualized_rate"]
-            using_twr = True
-        else:
-            monthly_total_return_rate = annual_total_return_rate / 12
-            twr_annualized = None
-            using_twr = False
-        total_monthly_income = corp_monthly_takehome + monthly_passive + other_income_monthly
-
-        proj_balance = accessible_balance
-        proj_labels = []
-        proj_passive = []
-        proj_burn = []
-        crossover_month = None
-        already_sustainable = (monthly_passive >= burn_rate)
-        now = datetime.now()
-        max_months = SUSTAINABILITY_PROJECTION_MONTHS
-        for i in range(max_months):
-            m_date = datetime(now.year, now.month, 1) + timedelta(days=32 * i)
-            m_date = m_date.replace(day=1)
-            proj_labels.append(m_date.strftime("%b %Y"))
-            passive_this_month = proj_balance * monthly_yield_rate
-            proj_passive.append(round(passive_this_month, 2))
-            proj_burn.append(round(burn_rate, 2))
-            if crossover_month is None and passive_this_month >= burn_rate and i > 0:
-                crossover_month = i
-            net_savings = max((corp_monthly_takehome + passive_this_month + other_income_monthly) - burn_rate, 0)
-            proj_balance = proj_balance * (1 + monthly_total_return_rate) + net_savings
-            if crossover_month is not None and i >= crossover_month + 12:
-                break
-
-        # Build summary line
-        if already_sustainable:
+    proj = met.projection
+    if proj:
+        proj_desc = proj["proj_desc"]
+        summary_text = proj["summary_text"]
+        if summary_text == "already_sustainable":
             summary_html = '<div style="font-size:1.1em;font-weight:600;color:#27ae60;margin:10px 0">You\'re already sustainable! Passive income covers your burn rate.</div>'
-        elif crossover_month is not None:
-            cross_date = datetime(now.year, now.month, 1) + timedelta(days=32 * crossover_month)
-            cross_date = cross_date.replace(day=1)
-            years = crossover_month // 12
-            mos = crossover_month % 12
-            time_str = ""
-            if years > 0:
-                time_str += f"{years}y "
-            time_str += f"{mos}m"
-            summary_html = f'<div style="font-size:1.1em;font-weight:600;color:#27ae60;margin:10px 0">Sustainability projected in {time_str} ({cross_date.strftime("%b %Y")})</div>'
-        else:
+        elif summary_text == "not_projected":
             summary_html = '<div style="font-size:1.1em;font-weight:600;color:#e74c3c;margin:10px 0">Not projected within 10 years at current rates</div>'
-
-        proj_labels_json = json.dumps(proj_labels)
-        proj_passive_json = json.dumps(proj_passive)
-        proj_burn_json = json.dumps(proj_burn)
-
-        # Point radius array: large green dot at crossover
-        point_radius = [0] * len(proj_passive)
-        point_bg = ["#27ae60"] * len(proj_passive)
-        if crossover_month is not None and crossover_month < len(point_radius):
-            point_radius[crossover_month] = 8
-        point_radius_json = json.dumps(point_radius)
-        point_bg_json = json.dumps(point_bg)
-
-        if using_twr:
-            d0 = datetime.strptime(twr["date_range"][0], "%Y-%m-%d").strftime("%b %Y")
-            d1 = datetime.strptime(twr["date_range"][1], "%Y-%m-%d").strftime("%b %Y")
-            proj_desc = (
-                f"TWR: {twr_annualized*100:.1f}%/yr "
-                f"(observed {d0} \u2013 {d1}, {twr['data_points']} data points), "
-                f"{annual_yield_rate*100:.1f}% yield, ${burn_rate:,.0f}/mo burn rate."
-            )
         else:
-            proj_desc = f"Assuming {annual_yield_rate*100:.1f}% yield, {annual_total_return_rate*100:.1f}% total return, ${burn_rate:,.0f}/mo burn rate."
+            summary_html = f'<div style="font-size:1.1em;font-weight:600;color:#27ae60;margin:10px 0">Sustainability projected in {summary_text}</div>'
+
+        proj_labels_json = json.dumps(proj["proj_labels"])
+        proj_passive_json = json.dumps(proj["proj_passive"])
+        proj_burn_json = json.dumps(proj["proj_burn"])
+        point_radius_json = json.dumps(proj["point_radius"])
+        point_bg_json = json.dumps(proj["point_bg"])
 
         sustainability_card = f"""
     <div class="card">
@@ -1122,58 +951,12 @@ def generate_html(data: dict, ai_html: str | None = None,
         }});
     }}"""
 
-    # ── Total income stat (for Income tab) ──
-    total_income_actual = 0.0
-    if corporate_income:
-        total_income_actual += corporate_income["total_income"]
-    if incoming_etransfers:
-        total_income_actual += sum(t["amount"] for t in incoming_etransfers)
-    if bank_interest:
-        total_income_actual += sum(t["amount"] for t in bank_interest)
-
-    # ── Milestones Timeline (unified) ──
-    timeline_events = []  # list of (date, icon, title, detail, color)
-
-    # Debt payoff events
-    if debt_payoffs:
-        payoff_by_merchant = defaultdict(lambda: {"total": 0.0, "last_date": None})
-        for d in debt_payoffs:
-            payoff_by_merchant[d["merchant"]]["total"] += d["amount"]
-            dt = d["date"]
-            prev = payoff_by_merchant[d["merchant"]]["last_date"]
-            if prev is None or dt > prev:
-                payoff_by_merchant[d["merchant"]]["last_date"] = dt
-        for merchant, info in payoff_by_merchant.items():
-            rate = INTEREST_RATES.get(merchant, 0)
-            annual_saved = info["total"] * rate
-            detail = f"{money(info['total'])} principal eliminated"
-            if annual_saved > 0:
-                detail += f" &mdash; saving {money(annual_saved)}/yr in interest"
-            timeline_events.append((info["last_date"], "\u2705", f"{merchant} Paid Off", detail, "#27ae60"))
-
-    # Corporate milestones
-    if corporate_income:
-        earliest = corporate_income.get("earliest_txn_date")
-        first_rev = corporate_income.get("first_revenue")
-        first_div = corporate_income.get("first_dividend")
-        if earliest:
-            timeline_events.append((earliest, "\U0001f3e2", "Corporate Ventures Launch", "Tall Tree Technology &amp; Britton Holdings accounts opened", "#4e79a7"))
-        if first_rev:
-            timeline_events.append((first_rev["date"], "\U0001f4b5", "First Tall Tree Revenue", f"First client payment received &mdash; {money(first_rev['amount'])}", "#27ae60"))
-        if first_div:
-            timeline_events.append((first_div["date"], "\U0001f4c8", "First Corporate Dividend", f"First investment dividend from Britton Holdings &mdash; {money(first_div['amount'])}", "#4e79a7"))
-
-    # Passive income milestone
-    if passive_income and monthly_passive > 0:
-        timeline_events.append((datetime.now().date(), "\U0001f33f", "Portfolio Yielding Passive Income", f"{money(monthly_passive)}/mo from {passive_income.get('account_count', 0)} accounts ({money(annual_passive)}/yr)", "#27ae60"))
-
-    # Sustainability milestone (if already sustainable)
-    if passive_income and burn_rate > 0 and combined_monthly >= burn_rate:
-        timeline_events.append((datetime.now().date(), "\u2b50", "Sustainability Achieved", f"Combined income ({money(combined_monthly)}/mo) covers burn rate ({money(burn_rate)}/mo)", "#f28e2b"))
+    # ── Total income & milestones (from metrics) ──
+    total_income_actual = met.total_income_actual
+    timeline_events = met.timeline_events
 
     def _to_date(d):
         return d.date() if isinstance(d, datetime) else d
-    timeline_events.sort(key=lambda e: _to_date(e[0]))
 
     milestones_section = ""
     if timeline_events:
@@ -1265,13 +1048,13 @@ def generate_html(data: dict, ai_html: str | None = None,
                     key = (row["date"], amt)
                     if row.get("note", "").strip():
                         etransfer_in_notes[key] = row["note"].strip()
-        etransfer_in_total = sum(t["amount"] for t in incoming_etransfers)
+        etransfer_in_total = sum(t.amount for t in incoming_etransfers)
         def _etransfer_in_row(t):
-            date_str = str(t["date"])[:10]
-            amt_str = f'{t["amount"]:.2f}'
+            date_str = str(t.date)[:10]
+            amt_str = f'{t.amount:.2f}'
             note = etransfer_in_notes.get((date_str, amt_str), "")
             note_html = f'<span style="color:var(--muted);font-style:italic">{note}</span>' if note else ""
-            return f'<td>{date_str}</td><td>{note_html}</td><td style="text-align:right">{money(t["amount"])}</td>'
+            return f'<td>{date_str}</td><td>{note_html}</td><td style="text-align:right">{money(t.amount)}</td>'
         etransfer_in_rows = month_grouped_rows(incoming_etransfers, _etransfer_in_row)
 
     # ── Bank Interest data prep ──
@@ -1279,10 +1062,10 @@ def generate_html(data: dict, ai_html: str | None = None,
     bi_rows = ""
     bi_total = 0
     if bank_interest:
-        bi_total = sum(t["amount"] for t in bank_interest)
+        bi_total = sum(t.amount for t in bank_interest)
         def _bi_row(t):
-            date_str = str(t["date"])[:10]
-            return f'<td>{date_str}</td><td>{t["account"]}</td><td style="text-align:right">{money(t["amount"])}</td>'
+            date_str = str(t.date)[:10]
+            return f'<td>{date_str}</td><td>{t.account}</td><td style="text-align:right">{money(t.amount)}</td>'
         bi_rows = month_grouped_rows(bank_interest, _bi_row)
 
     # ── Income tab top-level stats (trailing 6 months, matching burn rate) ──
@@ -1333,31 +1116,29 @@ def generate_html(data: dict, ai_html: str | None = None,
 
         # Seed rows for all Cash accounts so they always appear
         if passive_income:
-            for cat in ["accounts", "registered_accounts"]:
-                for a in passive_income.get(cat, []):
-                    if a.get("type") == "Cash":
-                        other_sources[f"Interest: {a['account']}"] = {}
+            for a in passive_income.get("cash_accounts", []):
+                other_sources[f"Interest: {a.account}"] = {}
 
         for t in incoming_etransfers:
-            m = str(t["date"])[:7]
+            m = str(t.date)[:7]
             if m not in sub_months_set:
                 continue
-            date_str = str(t["date"])[:10]
-            amt_str = f'{t["amount"]:.2f}'
+            date_str = str(t.date)[:10]
+            amt_str = f'{t.amount:.2f}'
             note = etransfer_in_notes.get((date_str, amt_str), "") if incoming_etransfers else ""
             key = f"e-Transfer: {note}" if note else "e-Transfer"
             other_sources.setdefault(key, {})
-            other_sources[key][m] = other_sources[key].get(m, 0) + t["amount"]
-            other_total += t["amount"]
+            other_sources[key][m] = other_sources[key].get(m, 0) + t.amount
+            other_total += t.amount
             other_count += 1
         for t in bank_interest:
-            m = str(t["date"])[:7]
+            m = str(t.date)[:7]
             if m not in sub_months_set:
                 continue
-            key = f"Interest: {t['account']}"
+            key = f"Interest: {t.account}"
             other_sources.setdefault(key, {})
-            other_sources[key][m] = other_sources[key].get(m, 0) + t["amount"]
-            other_total += t["amount"]
+            other_sources[key][m] = other_sources[key].get(m, 0) + t.amount
+            other_total += t.amount
             other_count += 1
 
         sorted_sources = sorted(other_sources.items(), key=lambda x: sum(x[1].values()), reverse=True)
@@ -1412,11 +1193,11 @@ def generate_html(data: dict, ai_html: str | None = None,
 </section>"""
 
     # ── Passive Income section ──
-    def balance_cell(a: dict) -> str:
+    def balance_cell(a) -> str:
         """Render a balance <td> with source annotation."""
-        src = a.get("balance_source", "")
-        dt = a.get("statement_date", "")
-        val = money(a["value"])
+        src = a.balance_source
+        dt = a.statement_date
+        val = money(a.value)
         if src and src != "portfolio.csv":
             note = dt if dt else src
             return (f"<td style='text-align:right'>{val}"
@@ -1425,14 +1206,14 @@ def generate_html(data: dict, ai_html: str | None = None,
             return (f"<td style='text-align:right;font-style:italic'>{val}"
                     f"<br><span style='font-size:0.75em;color:#e67e22'>csv</span></td>")
 
-    def return_cell(a: dict, has_twr: bool = False) -> str:
+    def return_cell(a, has_twr: bool = False) -> str:
         """Render a return % <td> with source annotation.
 
         When has_twr is True and the source is 'estimated', suppress the
         estimated return in favour of the TWR column.
         """
-        pct = a.get("return_pct", 0)
-        src = a.get("return_source", "")
+        pct = a.return_pct or 0
+        src = a.return_source
         if has_twr and src == "estimated":
             return "<td style='text-align:right;color:var(--muted)'>—</td>"
         if not src and pct == 0:
@@ -1444,10 +1225,10 @@ def generate_html(data: dict, ai_html: str | None = None,
         return (f"<td style='text-align:right'>{pct:.1f}%"
                 f"<br><span style='font-size:0.75em;color:var(--muted)'>{note}</span></td>")
 
-    def income_cell(a: dict) -> str:
+    def income_cell(a) -> str:
         """Render Income/yr <td> with source annotation."""
-        val = a["income_annual"]
-        src = a.get("income_source", "")
+        val = a.income_annual
+        src = a.income_source
         if src == "dividends":
             note = "dividends"
         elif src == "yield":
@@ -1461,9 +1242,9 @@ def generate_html(data: dict, ai_html: str | None = None,
         annotation = f"<br><span style='font-size:0.75em;color:var(--muted)'>{note}</span>" if note else ""
         return f"<td style='text-align:right'>{money(val)}{annotation}</td>"
 
-    def growth_cell(a: dict) -> str:
+    def growth_cell(a) -> str:
         """Render Growth/yr <td>."""
-        val = a["growth_annual"]
+        val = a.growth_annual
         if val == 0:
             return "<td style='text-align:right;color:var(--muted)'>—</td>"
         color = "#27ae60" if val > 0 else "#e74c3c"
@@ -1493,10 +1274,10 @@ def generate_html(data: dict, ai_html: str | None = None,
         acc_monthly = passive_income["monthly_income"]
 
         def _sort_twr(a):
-            pa = twr_by_account.get(a["account"])
+            pa = twr_by_account.get(a.account)
             if pa:
                 return ((1 + pa["monthly_return"]) ** 12 - 1) * 100
-            return a["return_pct"]
+            return a.return_pct
 
         all_accounts = list(passive_income["accounts"])
         reg_accounts = passive_income.get("registered_accounts", [])
@@ -1506,22 +1287,22 @@ def generate_html(data: dict, ai_html: str | None = None,
         acc_sorted = sorted(all_accounts, key=_sort_twr, reverse=True)
 
         # Tag each account so we can identify accessible vs registered
-        reg_names = {a["account"] for a in reg_accounts} if reg_accounts else set()
+        reg_names = {a.account for a in reg_accounts} if reg_accounts else set()
 
         portfolio_rows = ""
         total_balance = acc_total_balance + passive_income.get("registered_balance", 0)
         total_growth = acc_total_growth + passive_income.get("registered_growth", 0)
         for a in acc_sorted:
-            has_twr = a["account"] in twr_by_account
-            acct_type = a["type"]
-            if a["account"] in reg_names:
+            has_twr = a.account in twr_by_account
+            acct_type = a.type
+            if a.account in reg_names:
                 acct_type += " <span style='font-size:0.75em;color:var(--muted)'>(reg)</span>"
             portfolio_rows += (
-                f"<tr><td>{a['account']}</td><td>{a.get('brokerage','')}</td><td>{acct_type}</td>"
+                f"<tr><td>{a.account}</td><td>{a.brokerage}</td><td>{acct_type}</td>"
                 f"{balance_cell(a)}"
                 f"{return_cell(a, has_twr=has_twr)}"
                 f"{growth_cell(a)}"
-                f"{twr_cell(a['account'])}</tr>"
+                f"{twr_cell(a.account)}</tr>"
             )
 
         portfolio_monthly = acc_monthly + registered_monthly
@@ -1530,14 +1311,14 @@ def generate_html(data: dict, ai_html: str | None = None,
         # Exclude Cash accounts — their interest is in Other Income (bank interest)
         all_div_accounts = []  # [(name, {month: amount})]
         for a in acc_sorted:
-            if a.get("type") == "Cash":
+            if a.type == "Cash":
                 continue
-            dh = a.get("dividend_history", [])
-            monthly_map = {entry["month"]: entry["amount"] for entry in dh}
-            has_any_income = any(entry["amount"] > 0 for entry in dh)
-            is_ws_investment = a.get("balance_source") == "Wealthsimple statement" and a.get("type") == "Non-reg"
-            if has_any_income or a.get("income_annual", 0) > 0 or is_ws_investment:
-                all_div_accounts.append((a["account"], monthly_map))
+            dh = a.dividend_history
+            monthly_map = {entry.month: entry.amount for entry in dh}
+            has_any_income = any(entry.amount > 0 for entry in dh)
+            is_ws_investment = a.balance_source == "Wealthsimple statement" and a.type == "Non-reg"
+            if has_any_income or a.income_annual > 0 or is_ws_investment:
+                all_div_accounts.append((a.account, monthly_map))
 
         dividend_breakdown_html = ""
         div_avg = 0
@@ -1955,11 +1736,11 @@ def main():
     user_budgets = load_budgets(folder)
     passthrough = load_passthrough(folder)
     if passthrough:
-        print(f"Loaded {len(passthrough)} passthrough record(s): {', '.join(pt['description'] for pt in passthrough)}")
+        print(f"Loaded {len(passthrough)} passthrough record(s): {', '.join(pt.description for pt in passthrough)}")
     liabilities = load_liabilities(folder)
     if liabilities:
-        total_liab = sum(l["amount"] for l in liabilities)
-        print(f"Loaded {len(liabilities)} liability record(s): {', '.join(l['description'] for l in liabilities)} (${total_liab:,.2f} total)")
+        total_liab = sum(l.amount for l in liabilities)
+        print(f"Loaded {len(liabilities)} liability record(s): {', '.join(l.description for l in liabilities)} (${total_liab:,.2f} total)")
 
     transactions, debt_payoffs = parse_csvs(folder)
     print(f"Loaded {len(transactions)} transactions")
@@ -1977,10 +1758,10 @@ def main():
         if override_map:
             count = 0
             for t in transactions:
-                if t["merchant"] == "Interac e-Transfer":
-                    key = (str(t["date"])[:10], f'{t["amount"]:.2f}')
+                if t.merchant == "Interac e-Transfer":
+                    key = (str(t.date)[:10], f'{t.amount:.2f}')
                     if key in override_map:
-                        t["category"] = CATEGORY_CONSOLIDATION.get(override_map[key], override_map[key])
+                        t.category = CATEGORY_CONSOLIDATION.get(override_map[key], override_map[key])
                         count += 1
             if count:
                 print(f"Applied {count} e-transfer category overrides")
@@ -1995,7 +1776,7 @@ def main():
     # Extract bank interest from personal + corporate debit CSVs
     bank_interest, passthrough_adj = extract_bank_interest(folder, passthrough=passthrough)
     if bank_interest:
-        bi_total = sum(t["amount"] for t in bank_interest)
+        bi_total = sum(t.amount for t in bank_interest)
         print(f"Found {len(bank_interest)} bank interest payments totalling ${bi_total:,.2f}")
     if passthrough_adj:
         for desc, adj in passthrough_adj.items():

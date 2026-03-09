@@ -17,6 +17,13 @@ from config import (
     categorize,
     normalize_merchant,
 )
+from models import (
+    BalanceHistoryEntry,
+    DebtPayoff,
+    DividendHistoryEntry,
+    StatementBalance,
+    Transaction,
+)
 
 
 # ── CSV Parsing ──────────────────────────────────────────────────────────────
@@ -73,18 +80,16 @@ def parse_csvs(folder: str) -> list[dict]:
                         continue
                     category = categorize(merchant)
                     category = CATEGORY_CONSOLIDATION.get(category, category)
-                    entry = {
-                        "date": date,
-                        "month": date.strftime("%Y-%m"),
-                        "raw_merchant": raw_merchant,
-                        "merchant": merchant,
-                        "category": category,
-                        "amount": amount,
-                        "source": "credit",
-                    }
-                    if merchant in FIXED_COST_MERCHANTS:
-                        entry["fixed_cost"] = True
-                    transactions.append(entry)
+                    transactions.append(Transaction(
+                        date=date,
+                        month=date.strftime("%Y-%m"),
+                        raw_merchant=raw_merchant,
+                        merchant=merchant,
+                        category=category,
+                        amount=amount,
+                        source="credit",
+                        fixed_cost=merchant in FIXED_COST_MERCHANTS,
+                    ))
 
             elif "transaction" in headers:
                 # ── Debit card format ──
@@ -105,18 +110,16 @@ def parse_csvs(folder: str) -> list[dict]:
                             continue
                         category = categorize(merchant)
                         category = CATEGORY_CONSOLIDATION.get(category, category)
-                        entry = {
-                            "date": date,
-                            "month": date.strftime("%Y-%m"),
-                            "raw_merchant": description,
-                            "merchant": merchant,
-                            "category": category,
-                            "amount": abs(amount),
-                            "source": "debit",
-                        }
-                        if merchant in FIXED_COST_MERCHANTS:
-                            entry["fixed_cost"] = True
-                        transactions.append(entry)
+                        transactions.append(Transaction(
+                            date=date,
+                            month=date.strftime("%Y-%m"),
+                            raw_merchant=description,
+                            merchant=merchant,
+                            category=category,
+                            amount=abs(amount),
+                            source="debit",
+                            fixed_cost=merchant in FIXED_COST_MERCHANTS,
+                        ))
                     elif txn_type == "AFT_OUT":
                         # Extract merchant from "Pre-authorized Debit to MERCHANT"
                         merchant_raw = description
@@ -128,24 +131,24 @@ def parse_csvs(folder: str) -> list[dict]:
                         # Exclude large one-time debt payoffs
                         threshold = DEBT_PAYOFF_THRESHOLDS.get(merchant)
                         if threshold and amt > threshold:
-                            debt_payoffs.append({
-                                "merchant": merchant,
-                                "amount": amt,
-                                "date": date,
-                            })
+                            debt_payoffs.append(DebtPayoff(
+                                merchant=merchant,
+                                amount=amt,
+                                date=date,
+                            ))
                             continue
                         category = categorize(merchant)
                         category = CATEGORY_CONSOLIDATION.get(category, category)
-                        transactions.append({
-                            "date": date,
-                            "month": date.strftime("%Y-%m"),
-                            "raw_merchant": description,
-                            "merchant": merchant,
-                            "category": category,
-                            "amount": amt,
-                            "source": "debit",
-                            "fixed_cost": True,
-                        })
+                        transactions.append(Transaction(
+                            date=date,
+                            month=date.strftime("%Y-%m"),
+                            raw_merchant=description,
+                            merchant=merchant,
+                            category=category,
+                            amount=amt,
+                            source="debit",
+                            fixed_cost=True,
+                        ))
                     elif txn_type == "OBP_OUT":
                         # Online bill payments (e.g. property taxes)
                         # Extract merchant from "Online bill payment for MERCHANT, account ..."
@@ -158,39 +161,39 @@ def parse_csvs(folder: str) -> list[dict]:
                         category = categorize(merchant)
                         category = CATEGORY_CONSOLIDATION.get(category, category)
                         amt = abs(amount)
-                        transactions.append({
-                            "date": date,
-                            "month": date.strftime("%Y-%m"),
-                            "raw_merchant": description,
-                            "merchant": merchant,
-                            "category": category,
-                            "amount": amt,
-                            "source": "debit",
-                            "fixed_cost": True,
-                        })
+                        transactions.append(Transaction(
+                            date=date,
+                            month=date.strftime("%Y-%m"),
+                            raw_merchant=description,
+                            merchant=merchant,
+                            category=category,
+                            amount=amt,
+                            source="debit",
+                            fixed_cost=True,
+                        ))
                     elif txn_type == "E_TRFOUT":
                         date = datetime.strptime(row["date"], "%Y-%m-%d")
                         merchant = "Interac e-Transfer"
                         category = categorize(merchant)
                         category = CATEGORY_CONSOLIDATION.get(category, category)
                         amt = abs(amount)
-                        transactions.append({
-                            "date": date,
-                            "month": date.strftime("%Y-%m"),
-                            "raw_merchant": description,
-                            "merchant": merchant,
-                            "category": category,
-                            "amount": amt,
-                            "source": "debit",
-                        })
+                        transactions.append(Transaction(
+                            date=date,
+                            month=date.strftime("%Y-%m"),
+                            raw_merchant=description,
+                            merchant=merchant,
+                            category=category,
+                            amount=amt,
+                            source="debit",
+                        ))
 
     print(f"Found {credit_count} credit card and {debit_count} debit card CSV files")
     if business_total > 0:
         print(f"Excluded ${business_total:,.2f} in business expenses (Zensurance, FreshBooks)")
     if debt_payoffs:
-        total_payoffs = sum(d["amount"] for d in debt_payoffs)
+        total_payoffs = sum(d.amount for d in debt_payoffs)
         print(f"Excluded ${total_payoffs:,.2f} in debt payoffs (mortgage/auto — paid off)")
-    return sorted(transactions, key=lambda t: t["date"]), debt_payoffs
+    return sorted(transactions, key=lambda t: t.date), debt_payoffs
 
 
 # ── Statement Balance Parsing ────────────────────────────────────────────────
@@ -342,16 +345,13 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
         # Simple return rate: (market_value - book_cost) / book_cost
         simple_return = round((balance - book_cost) / book_cost * 100, 2) if book_cost > 0 else None
 
-        results[suffix] = {
-            "balance": balance,
-            "date": stmt_date,
-            "source": "Wealthsimple statement",
-            "return_pct": simple_return,
-            "return_source": "estimated",
-            "dividends_annual": None,
-            "balance_history": [],
-            "dividend_history": [],
-        }
+        results[suffix] = StatementBalance(
+            balance=balance,
+            date=stmt_date,
+            source="Wealthsimple statement",
+            return_pct=simple_return,
+            return_source="estimated",
+        )
 
         # Override return rate from Performance PDF if available
         if suffix in ws_perf_pdfs:
@@ -369,8 +369,8 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                     since_inception = float(rate_m.group(6))
                     chosen = one_year if one_year > 0 else since_inception
                     if chosen > 0:
-                        results[suffix]["return_pct"] = chosen
-                        results[suffix]["return_source"] = "performance report"
+                        results[suffix].return_pct = chosen
+                        results[suffix].return_source = "performance report"
 
         # Parse dividends + interest from ALL monthly statements for this account
         # Also extract balance history (balance, deposits, withdrawals) per month
@@ -422,10 +422,10 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                     monthly_income += sav_interest
             total_income += monthly_income
             month_key = ds[:7] if len(ds) >= 7 else ds
-            results[suffix]["dividend_history"].append({
-                "month": month_key,
-                "amount": round(monthly_income, 2),
-            })
+            results[suffix].dividend_history.append(DividendHistoryEntry(
+                month=month_key,
+                amount=round(monthly_income, 2),
+            ))
 
             # Extract balance history entry for this month
             bh_m = re.search(
@@ -486,48 +486,48 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                 )
                 hist_date = hist_dm.group(2) if hist_dm else ds
 
-                results[suffix]["balance_history"].append({
-                    "date": hist_date,
-                    "balance": hist_bal,
-                    "deposits": hist_dep,
-                    "withdrawals": hist_wdr,
-                })
+                results[suffix].balance_history.append(BalanceHistoryEntry(
+                    date=hist_date,
+                    balance=hist_bal,
+                    deposits=hist_dep,
+                    withdrawals=hist_wdr,
+                ))
 
         # Sort balance history and dividend history chronologically
-        results[suffix]["balance_history"].sort(key=lambda x: x["date"])
+        results[suffix].balance_history.sort(key=lambda x: x.date)
         # Deduplicate balance history: when a savings-format entry (YYYY-MM)
         # and a _person_ statement entry (YYYY-MM-DD) cover the same month,
         # keep the _person_ entry which has actual deposit/withdrawal figures.
         seen_months: dict[str, int] = {}
-        deduped: list[dict] = []
-        for entry in results[suffix]["balance_history"]:
-            month_key = entry["date"][:7]
+        deduped: list[BalanceHistoryEntry] = []
+        for entry in results[suffix].balance_history:
+            month_key = entry.date[:7]
             if month_key in seen_months:
                 prev_idx = seen_months[month_key]
                 prev = deduped[prev_idx]
                 # Prefer the entry with a full date (from _person_ statement)
-                if len(entry["date"]) > len(prev["date"]):
+                if len(entry.date) > len(prev.date):
                     deduped[prev_idx] = entry
             else:
                 seen_months[month_key] = len(deduped)
                 deduped.append(entry)
-        results[suffix]["balance_history"] = deduped
+        results[suffix].balance_history = deduped
         # Deduplicate dividend history: keep the max amount per month
         # (avoids double-counting when both _identity_ and _person_/Performance
         # files exist for the same month)
-        results[suffix]["dividend_history"].sort(key=lambda x: x["month"])
+        results[suffix].dividend_history.sort(key=lambda x: x.month)
         div_by_month: dict[str, float] = {}
-        for entry in results[suffix]["dividend_history"]:
-            m = entry["month"]
-            div_by_month[m] = max(div_by_month.get(m, 0), entry["amount"])
-        results[suffix]["dividend_history"] = [
-            {"month": m, "amount": amt} for m, amt in sorted(div_by_month.items())
+        for entry in results[suffix].dividend_history:
+            m = entry.month
+            div_by_month[m] = max(div_by_month.get(m, 0), entry.amount)
+        results[suffix].dividend_history = [
+            DividendHistoryEntry(month=m, amount=amt) for m, amt in sorted(div_by_month.items())
         ]
         # Recompute annual income from deduped dividend history
         if div_by_month:
             deduped_total = sum(div_by_month.values())
             if deduped_total > 0:
-                results[suffix]["dividends_annual"] = round(
+                results[suffix].dividends_annual = round(
                     deduped_total / len(div_by_month) * 12, 2
                 )
 
@@ -595,12 +595,12 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                     bal = float(row_m.group(2).replace(",", ""))
                     if bal > 0:
                         deps, wdrs = sh_flows.get(acct_num, (0.0, 0.0))
-                        sh_balance_history[acct_num].append({
-                            "date": iso_date,
-                            "balance": bal,
-                            "deposits": deps,
-                            "withdrawals": wdrs,
-                        })
+                        sh_balance_history[acct_num].append(BalanceHistoryEntry(
+                            date=iso_date,
+                            balance=bal,
+                            deposits=deps,
+                            withdrawals=wdrs,
+                        ))
 
             # Prepend beginning value from oldest PDF as the opening data point
             if sh_pdfs:
@@ -614,12 +614,12 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                 begin_date = f"{begin_year}-{begin_month:02d}-28"
                 for acct_num, begin_bal in sh_begin.items():
                     if begin_bal > 0:
-                        sh_balance_history[acct_num].insert(0, {
-                            "date": begin_date,
-                            "balance": begin_bal,
-                            "deposits": 0.0,
-                            "withdrawals": 0.0,
-                        })
+                        sh_balance_history[acct_num].insert(0, BalanceHistoryEntry(
+                            date=begin_date,
+                            balance=begin_bal,
+                            deposits=0.0,
+                            withdrawals=0.0,
+                        ))
 
             # Use latest PDF for current balance, returns, and dividends
             _, latest_pdf = sh_pdfs[0]
@@ -640,29 +640,27 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                     if balance <= 0:
                         continue
                     history = sh_balance_history.get(acct_num, [])
-                    history.sort(key=lambda x: x["date"])
-                    results[acct_num] = {
-                        "balance": balance,
-                        "date": stmt_date,
-                        "source": "Steadyhand statement",
-                        "return_pct": None,
-                        "dividends_annual": None,
-                        "balance_history": history,
-                    }
+                    history.sort(key=lambda x: x.date)
+                    results[acct_num] = StatementBalance(
+                        balance=balance,
+                        date=stmt_date,
+                        source="Steadyhand statement",
+                        balance_history=history,
+                    )
 
                 # Parse per-account 1-year returns (first match per account wins)
                 for acct_m in re.finditer(r"Account (\d{7})\s+\w", text):
                     acct_num = acct_m.group(1)
-                    if acct_num not in results or results[acct_num]["return_pct"] is not None:
+                    if acct_num not in results or results[acct_num].return_pct is not None:
                         continue
                     si = re.search(r"1 Year\s+([\d.]+)", text[acct_m.start():])
                     if si:
-                        results[acct_num]["return_pct"] = float(si.group(1))
+                        results[acct_num].return_pct = float(si.group(1))
 
                 # Parse per-account dividends from "Distribution - Reinvested" lines
                 # Quarterly statements: sum amounts, annualize by ×4
                 for acct_num in list(results.keys()):
-                    if not results[acct_num]["source"].startswith("Steadyhand"):
+                    if not results[acct_num].source.startswith("Steadyhand"):
                         continue
                     acct_pattern = f"Account {acct_num}"
                     acct_pos = text.find(acct_pattern)
@@ -676,7 +674,7 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                     for dist_m in re.finditer(r"Distribution - Reinvested\s+[\d/]+\s+([\d,]+\.\d{2})", section):
                         total_dist += float(dist_m.group(1).replace(",", ""))
                     if total_dist > 0:
-                        results[acct_num]["dividends_annual"] = round(total_dist * 4, 2)
+                        results[acct_num].dividends_annual = round(total_dist * 4, 2)
 
     # ── Scotiabank (e-statement PDFs) ───────────────────────────────────
     MONTH_NAMES = {
@@ -737,13 +735,11 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                 if bal_m:
                     balance = float(bal_m.group(2).replace(",", ""))
                     stmt_date = bal_m.group(1).strip()
-                    results[acct_num] = {
-                        "balance": balance,
-                        "date": stmt_date,
-                        "source": "Scotiabank statement",
-                        "return_pct": None,
-                        "dividends_annual": None,
-                    }
+                    results[acct_num] = StatementBalance(
+                        balance=balance,
+                        date=stmt_date,
+                        source="Scotiabank statement",
+                    )
             else:
                 # Corporate: last balance from transaction lines
                 # Format: MM/DD/YYYY  DESCRIPTION  amount  amount  balance
@@ -765,13 +761,11 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                         if amounts:
                             last_balance = float(amounts[-1].replace(",", ""))
                 if last_balance is not None:
-                    results[acct_num] = {
-                        "balance": last_balance,
-                        "date": stmt_date,
-                        "source": "Scotiabank statement",
-                        "return_pct": None,
-                        "dividends_annual": None,
-                    }
+                    results[acct_num] = StatementBalance(
+                        balance=last_balance,
+                        date=stmt_date,
+                        source="Scotiabank statement",
+                    )
 
     # ── BC Property Assessments (sidecar CSV beside scanned PDFs) ───────────
     bc_dir = os.path.join(stmt_dir, "personal", "British Columbia")
@@ -801,14 +795,13 @@ def parse_statement_balances(folder: str) -> dict[str, dict]:
                     return_pct = float(change_str)
                 except (ValueError, TypeError):
                     return_pct = None
-                bc_rows[suffix] = (year_int, {
-                    "balance": balance,
-                    "date": f"{year} assessment",
-                    "source": "BC Assessment",
-                    "return_pct": return_pct,
-                    "return_source": "BC Assessment",
-                    "dividends_annual": None,
-                })
+                bc_rows[suffix] = (year_int, StatementBalance(
+                    balance=balance,
+                    date=f"{year} assessment",
+                    source="BC Assessment",
+                    return_pct=return_pct,
+                    return_source="BC Assessment",
+                ))
         for suffix, (_, entry) in bc_rows.items():
             results[suffix] = entry
 

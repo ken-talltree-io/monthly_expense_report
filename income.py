@@ -8,17 +8,14 @@ import re
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 
+from models import AccountEntry, BankInterest, ETransfer, Liability, Passthrough, PassiveIncomeResult
 from parsers import parse_statement_balances
 
 
 # ── Passthrough Loading ──────────────────────────────────────────────────────
 
-def load_passthrough(folder: str) -> list[dict]:
-    """Load passthrough records from passthrough.csv.
-
-    Returns list of {"account_suffix": str, "start_date": date, "end_date": date,
-                      "principal": float, "description": str}.
-    """
+def load_passthrough(folder: str) -> list[Passthrough]:
+    """Load passthrough records from passthrough.csv."""
     path = os.path.join(folder, "passthrough.csv")
     if not os.path.exists(path):
         return []
@@ -26,18 +23,18 @@ def load_passthrough(folder: str) -> list[dict]:
     records = []
     with open(path, newline="", encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
-            records.append({
-                "account_suffix": row["account_suffix"].strip(),
-                "start_date": datetime.strptime(row["start_date"].strip(), "%Y-%m-%d").date(),
-                "end_date": datetime.strptime(row["end_date"].strip(), "%Y-%m-%d").date(),
-                "principal": float(row["principal"].strip()),
-                "description": row["description"].strip(),
-            })
+            records.append(Passthrough(
+                account_suffix=row["account_suffix"].strip(),
+                start_date=datetime.strptime(row["start_date"].strip(), "%Y-%m-%d").date(),
+                end_date=datetime.strptime(row["end_date"].strip(), "%Y-%m-%d").date(),
+                principal=float(row["principal"].strip()),
+                description=row["description"].strip(),
+            ))
     return records
 
 
-def load_liabilities(folder: str) -> list[dict]:
-    """Load liabilities.csv → list of {"description", "start_date", "end_date", "amount"}."""
+def load_liabilities(folder: str) -> list[Liability]:
+    """Load liabilities.csv."""
     path = os.path.join(folder, "liabilities.csv")
     if not os.path.exists(path):
         return []
@@ -45,18 +42,18 @@ def load_liabilities(folder: str) -> list[dict]:
     records = []
     with open(path, newline="", encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
-            records.append({
-                "description": row["description"].strip(),
-                "start_date": datetime.strptime(row["start_date"].strip(), "%Y-%m-%d").date(),
-                "end_date": datetime.strptime(row["end_date"].strip(), "%Y-%m-%d").date(),
-                "amount": float(row["amount"].strip()),
-            })
+            records.append(Liability(
+                description=row["description"].strip(),
+                start_date=datetime.strptime(row["start_date"].strip(), "%Y-%m-%d").date(),
+                end_date=datetime.strptime(row["end_date"].strip(), "%Y-%m-%d").date(),
+                amount=float(row["amount"].strip()),
+            ))
     return records
 
 
 # ── Income & Transfer Extraction ─────────────────────────────────────────────
 
-def extract_passive_income(folder: str) -> dict | None:
+def extract_passive_income(folder: str) -> PassiveIncomeResult | None:
     """Extract annual passive income from investment portfolio.
 
     Balances/returns/income from PDF statements;
@@ -66,12 +63,13 @@ def extract_passive_income(folder: str) -> dict | None:
     if not os.path.exists(portfolio_path):
         return None
 
-    ACCESSIBLE_TYPES = {"Non-reg", "Cash", "TFSA"}  # spendable without tax penalty
+    ACCESSIBLE_TYPES = {"Non-reg", "TFSA"}  # spendable without tax penalty
 
     accessible = []
     registered = []  # RRSP + RESP
     corporate_accts = []
     property_accts = []
+    cash_accts = []  # chequing/savings — excluded from portfolio, included in net worth
 
     # Always parse statements so balance_history is available in both modes
     stmt_balances = parse_statement_balances(folder)
@@ -120,9 +118,9 @@ def extract_passive_income(folder: str) -> dict | None:
 
             # Balance from statement
             if stmt:
-                total_value = stmt["balance"]
-                balance_source = stmt["source"]
-                statement_date = stmt["date"]
+                total_value = stmt.balance
+                balance_source = stmt.source
+                statement_date = stmt.date
             else:
                 total_value = 0.0
                 balance_source = ""
@@ -133,10 +131,10 @@ def extract_passive_income(folder: str) -> dict | None:
 
             # Parse investment start date
             start_date = None
-            if stmt and stmt.get("balance_history"):
+            if stmt and stmt.balance_history:
                 # Derive from earliest balance_history entry
                 try:
-                    start_date = datetime.strptime(stmt["balance_history"][0]["date"][:10], "%Y-%m-%d").date()
+                    start_date = datetime.strptime(stmt.balance_history[0].date[:10], "%Y-%m-%d").date()
                 except (ValueError, TypeError, KeyError):
                     pass
             if start_date is None and col_start_date is not None and col_start_date < len(row):
@@ -149,9 +147,9 @@ def extract_passive_income(folder: str) -> dict | None:
                         continue
 
             # Return % from statement
-            if stmt and stmt.get("return_pct") is not None:
-                return_pct = stmt["return_pct"]
-                return_source = stmt.get("return_source", stmt["source"])
+            if stmt and stmt.return_pct is not None:
+                return_pct = stmt.return_pct
+                return_source = stmt.return_source or stmt.source
             else:
                 return_pct = 0.0
                 return_source = ""
@@ -161,8 +159,8 @@ def extract_passive_income(folder: str) -> dict | None:
             strategy = ""
 
             # Income from statement dividends
-            if stmt and stmt.get("dividends_annual") is not None:
-                income_annual = stmt["dividends_annual"]
+            if stmt and stmt.dividends_annual is not None:
+                income_annual = stmt.dividends_annual
                 income_source = "dividends"
             else:
                 income_annual = 0.0
@@ -178,28 +176,28 @@ def extract_passive_income(folder: str) -> dict | None:
             if csv_brokerage:
                 brokerage = csv_brokerage
             elif stmt:
-                brokerage = stmt["source"].replace(" statement", "")
+                brokerage = stmt.source.replace(" statement", "")
             else:
                 brokerage = ""
 
-            entry = {
-                "account": account,
-                "brokerage": brokerage,
-                "type": asset_type,
-                "suffix": acct_suffix,
-                "value": total_value,
-                "income_annual": round(income_annual, 2),
-                "growth_annual": round(growth_annual, 2),
-                "return_pct": round(return_pct, 2),
-                "return_source": return_source,
-                "income_source": income_source,
-                "strategy": strategy,
-                "start_date": start_date,
-                "balance_source": balance_source,
-                "statement_date": statement_date,
-                "balance_history": stmt.get("balance_history", []) if stmt else [],
-                "dividend_history": stmt.get("dividend_history", []) if stmt else [],
-            }
+            entry = AccountEntry(
+                account=account,
+                brokerage=brokerage,
+                type=asset_type,
+                suffix=acct_suffix,
+                value=total_value,
+                income_annual=round(income_annual, 2),
+                growth_annual=round(growth_annual, 2),
+                return_pct=round(return_pct, 2),
+                return_source=return_source,
+                income_source=income_source,
+                strategy=strategy,
+                start_date=start_date,
+                balance_source=balance_source,
+                statement_date=statement_date,
+                balance_history=stmt.balance_history if stmt else [],
+                dividend_history=stmt.dividend_history if stmt else [],
+            )
 
             # Skip closed accounts with zero balance
             if is_closed and total_value == 0:
@@ -210,36 +208,41 @@ def extract_passive_income(folder: str) -> dict | None:
                 property_accts.append(entry)
             elif asset_type in ("RRSP", "RESP"):
                 registered.append(entry)
+            elif asset_type == "Cash":
+                cash_accts.append(entry)
             elif asset_type in ACCESSIBLE_TYPES:
                 accessible.append(entry)
 
-    if not accessible and not registered and not corporate_accts and not property_accts:
+    if not accessible and not registered and not corporate_accts and not property_accts and not cash_accts:
         return None
 
-    accessible_income = sum(a["income_annual"] for a in accessible)
-    accessible_growth = sum(a["growth_annual"] for a in accessible)
-    registered_income = sum(a["income_annual"] for a in registered)
-    registered_growth = sum(a["growth_annual"] for a in registered)
-    accessible_balance = sum(a["value"] for a in accessible)
-    registered_balance = sum(a["value"] for a in registered)
-    corporate_balance = sum(a["value"] for a in corporate_accts)
-    property_balance = sum(a["value"] for a in property_accts)
+    accessible_income = sum(a.income_annual for a in accessible)
+    accessible_growth = sum(a.growth_annual for a in accessible)
+    registered_income = sum(a.income_annual for a in registered)
+    registered_growth = sum(a.growth_annual for a in registered)
+    accessible_balance = sum(a.value for a in accessible)
+    registered_balance = sum(a.value for a in registered)
+    corporate_balance = sum(a.value for a in corporate_accts)
+    property_balance = sum(a.value for a in property_accts)
+    cash_balance = sum(a.value for a in cash_accts)
 
     return {
         "annual_income": round(accessible_income, 2),
         "monthly_income": round(accessible_income / 12, 2) if accessible_income else 0,
         "annual_growth": round(accessible_growth, 2),
-        "accounts": sorted(accessible, key=lambda a: a["return_pct"], reverse=True),
+        "accounts": sorted(accessible, key=lambda a: a.return_pct, reverse=True),
         "accessible_balance": round(accessible_balance, 2),
         "registered_annual": round(registered_income, 2),
         "registered_monthly": round(registered_income / 12, 2) if registered_income else 0,
         "registered_growth": round(registered_growth, 2),
-        "registered_accounts": sorted(registered, key=lambda a: a["return_pct"], reverse=True),
+        "registered_accounts": sorted(registered, key=lambda a: a.return_pct, reverse=True),
         "registered_balance": round(registered_balance, 2),
         "corporate_accounts": corporate_accts,
         "corporate_balance": round(corporate_balance, 2),
         "property_accounts": property_accts,
         "property_balance": round(property_balance, 2),
+        "cash_accounts": cash_accts,
+        "cash_balance": round(cash_balance, 2),
     }
 
 
@@ -265,7 +268,7 @@ def compute_modified_dietz(passive_income: dict,
     # Index passthrough by account suffix
     pt_by_suffix: dict[str, list] = {}
     for pt in passthrough:
-        pt_by_suffix.setdefault(pt["account_suffix"], []).append(pt)
+        pt_by_suffix.setdefault(pt.account_suffix, []).append(pt)
 
     all_accounts = passive_income.get("accounts", []) + passive_income.get("registered_accounts", [])
     per_account = []
@@ -274,14 +277,14 @@ def compute_modified_dietz(passive_income: dict,
 
     for acct in all_accounts:
         # Skip closed accounts — balance went to zero from transfers, not losses
-        if "(closed)" in acct.get("account", "").lower():
+        if "(closed)" in acct.account.lower():
             continue
 
-        history = acct.get("balance_history", [])
+        history = acct.balance_history
         if len(history) < 2:
             continue
 
-        acct_suffix = acct.get("suffix", "")
+        acct_suffix = acct.suffix
         acct_pts = pt_by_suffix.get(acct_suffix, [])
 
         # Determine pre-passthrough floor balance for each passthrough
@@ -294,20 +297,20 @@ def compute_modified_dietz(passive_income: dict,
                     hd = None
                     for fmt in ("%Y-%m-%d", "%Y-%m"):
                         try:
-                            hd = datetime.strptime(h["date"][:10], fmt)
+                            hd = datetime.strptime(h.date[:10], fmt)
                             break
                         except ValueError:
                             continue
                     if hd:
                         # YYYY-MM dates are month-end snapshots — use last day of month
-                        if len(h["date"].strip()) <= 7:
+                        if len(h.date.strip()) <= 7:
                             _, last_day = calendar.monthrange(hd.year, hd.month)
                             hd_date = date(hd.year, hd.month, last_day)
                         else:
                             hd_date = hd.date()
-                        if hd_date < pt["start_date"]:
-                            floor = h["balance"]
-                pt_floors[pt["account_suffix"]] = floor
+                        if hd_date < pt.start_date:
+                            floor = h.balance
+                pt_floors[pt.account_suffix] = floor
 
         cumulative = 1.0
         total_months = 0
@@ -315,25 +318,25 @@ def compute_modified_dietz(passive_income: dict,
         for i in range(1, len(history)):
             t0 = history[i - 1]
             t1 = history[i]
-            b0 = t0["balance"]
-            b1 = t1["balance"]
+            b0 = t0.balance
+            b1 = t1.balance
             if b0 <= 0:
                 continue
 
-            deposits = t1["deposits"]
-            withdrawals = t1["withdrawals"]
+            deposits = t1.deposits
+            withdrawals = t1.withdrawals
 
             # Parse period dates (handles both YYYY-MM-DD and YYYY-MM formats)
             d0 = d1 = None
             for fmt in ("%Y-%m-%d", "%Y-%m"):
                 try:
-                    d0 = datetime.strptime(t0["date"][:10], fmt)
+                    d0 = datetime.strptime(t0.date[:10], fmt)
                     break
                 except ValueError:
                     continue
             for fmt in ("%Y-%m-%d", "%Y-%m"):
                 try:
-                    d1 = datetime.strptime(t1["date"][:10], fmt)
+                    d1 = datetime.strptime(t1.date[:10], fmt)
                     break
                 except ValueError:
                     continue
@@ -353,14 +356,14 @@ def compute_modified_dietz(passive_income: dict,
                         return date(dt_obj.year, dt_obj.month, last_day)
                     return dt_obj.date()
 
-                d0_date = _eom(d0, t0["date"])
-                d1_date = _eom(d1, t1["date"])
+                d0_date = _eom(d0, t0.date)
+                d1_date = _eom(d1, t1.date)
 
                 for pt in acct_pts:
-                    pt_start = pt["start_date"]
-                    pt_end = pt["end_date"]
-                    principal = pt["principal"]
-                    floor = pt_floors.get(pt["account_suffix"], 0)
+                    pt_start = pt.start_date
+                    pt_end = pt.end_date
+                    principal = pt.principal
+                    floor = pt_floors.get(pt.account_suffix, 0)
                     active_at_t0 = pt_start <= d0_date < pt_end
                     active_at_t1 = pt_start <= d1_date < pt_end
 
@@ -394,8 +397,8 @@ def compute_modified_dietz(passive_income: dict,
 
             total_months += months_in_period
             balances.append((b0 + b1) / 2)
-            date_str_0 = d0.strftime("%Y-%m-%d") if d0 else t0["date"][:10]
-            date_str_1 = d1.strftime("%Y-%m-%d") if d1 else t1["date"][:10]
+            date_str_0 = d0.strftime("%Y-%m-%d") if d0 else t0.date[:10]
+            date_str_1 = d1.strftime("%Y-%m-%d") if d1 else t1.date[:10]
             all_dates.append(date_str_0)
             all_dates.append(date_str_1)
 
@@ -404,7 +407,7 @@ def compute_modified_dietz(passive_income: dict,
             monthly_return = cumulative ** (1 / total_months) - 1
             avg_balance = sum(balances) / len(balances)
             per_account.append({
-                "account": acct["account"],
+                "account": acct.account,
                 "monthly_return": monthly_return,
                 "avg_balance": avg_balance,
                 "data_points": len(balances),
@@ -458,6 +461,7 @@ def compute_net_worth_history(passive_income: dict, passthrough: list | None = N
 
     CATEGORY_MAP = {
         "accounts": "accessible",
+        "cash_accounts": "accessible",
         "registered_accounts": "registered",
         "corporate_accounts": "corporate",
         "property_accounts": "property",
@@ -469,21 +473,21 @@ def compute_net_worth_history(passive_income: dict, passthrough: list | None = N
 
     for key, category in CATEGORY_MAP.items():
         for acct in passive_income.get(key, []):
-            history = acct.get("balance_history", [])
+            history = acct.balance_history
             if history:
                 monthly = {}
                 for entry in history:
-                    date_str = entry["date"][:10]
+                    date_str = entry.date[:10]
                     try:
                         month = datetime.strptime(date_str, "%Y-%m-%d").strftime("%Y-%m")
                     except (ValueError, TypeError):
                         continue
-                    monthly[month] = entry["balance"]
+                    monthly[month] = entry.balance
                 if monthly:
                     account_series.append((category, monthly))
             else:
                 # No history — use current value as constant
-                val = acct.get("value", 0)
+                val = acct.value
                 if val > 0:
                     constant_accounts.append((category, val))
 
@@ -535,7 +539,7 @@ def compute_net_worth_history(passive_income: dict, passthrough: list | None = N
         for month in all_months:
             year, mon = int(month[:4]), int(month[5:7])
             month_end = date(year, mon, calendar.monthrange(year, mon)[1])
-            if month_end < pt["start_date"]:
+            if month_end < pt.start_date:
                 floor = max(floor, category_totals["accessible"][month])
 
         for month in all_months:
@@ -544,9 +548,9 @@ def compute_net_worth_history(passive_income: dict, passthrough: list | None = N
 
             # Only subtract when money is present at month-end:
             # deposited on/before month_end AND hasn't left yet (end_date > month_end)
-            if pt["start_date"] <= month_end < pt["end_date"]:
+            if pt.start_date <= month_end < pt.end_date:
                 max_sub = max(0, category_totals["accessible"][month] - floor)
-                actual_sub = min(pt["principal"], max_sub)
+                actual_sub = min(pt.principal, max_sub)
                 category_totals["accessible"][month] -= actual_sub
 
     # Assemble result
@@ -554,7 +558,7 @@ def compute_net_worth_history(passive_income: dict, passthrough: list | None = N
     for month in all_months:
         row = {"month": month}
         asset_total = 0.0
-        for category in CATEGORY_MAP.values():
+        for category in dict.fromkeys(CATEGORY_MAP.values()):
             val = round(category_totals[category][month], 2)
             row[category] = val
             asset_total += val
@@ -564,8 +568,8 @@ def compute_net_worth_history(passive_income: dict, passthrough: list | None = N
         month_end = date(year, mon, calendar.monthrange(year, mon)[1])
         liability_total = 0.0
         for liab in (liabilities or []):
-            if liab["start_date"] <= month_end < liab["end_date"]:
-                liability_total += liab["amount"]
+            if liab.start_date <= month_end < liab.end_date:
+                liability_total += liab.amount
 
         row["liabilities"] = round(-liability_total, 2)
         row["total"] = round(asset_total - liability_total, 2)
@@ -586,7 +590,7 @@ def extract_transfers(folder: str, passthrough: list | None = None) -> tuple[dic
     a passthrough description (substring) are excluded.
     """
     passthrough = passthrough or []
-    pt_descriptions = [pt["description"] for pt in passthrough]
+    pt_descriptions = [pt.description for pt in passthrough]
 
     TRANSFER_TYPES = {"TRFOUT", "TRFIN", "TRFINTF", "E_TRFOUT", "E_TRFIN", "EFTOUT"}
     transfers = defaultdict(lambda: {"in": 0.0, "out": 0.0})
@@ -624,13 +628,13 @@ def extract_transfers(folder: str, passthrough: list | None = None) -> tuple[dic
                 if amount > 0:
                     transfers[month]["in"] += amount
                     if txn_type == "E_TRFIN":
-                        incoming_etransfers.append({"date": dt.date(), "amount": amount})
+                        incoming_etransfers.append(ETransfer(date=dt.date(), amount=amount))
                 else:
                     transfers[month]["out"] += abs(amount)
 
     aggregates = {m: {"in": round(v["in"], 2), "out": round(v["out"], 2)}
                   for m, v in transfers.items()}
-    incoming_etransfers.sort(key=lambda t: t["date"], reverse=True)
+    incoming_etransfers.sort(key=lambda t: t.date, reverse=True)
     return aggregates, incoming_etransfers
 
 
@@ -654,7 +658,7 @@ def extract_bank_interest(folder: str, passthrough: list | None = None) -> tuple
     # Build suffix lookup for passthrough
     pt_by_suffix = {}
     for pt in passthrough:
-        pt_by_suffix.setdefault(pt["account_suffix"], []).append(pt)
+        pt_by_suffix.setdefault(pt.account_suffix, []).append(pt)
 
     for subdir in ["personal", "corporate"]:
         txn_dir = os.path.join(folder, "transactions", subdir)
@@ -708,21 +712,21 @@ def extract_bank_interest(folder: str, passthrough: list | None = None) -> tuple
                                 prior_start = date(dt.year, dt.month - 1, 1)
                                 prior_end = dt.replace(day=1) - timedelta(days=1)
 
-                            if pt["start_date"] <= prior_end and pt["end_date"] >= prior_start:
+                            if pt.start_date <= prior_end and pt.end_date >= prior_start:
                                 balance_before = balance - amount
                                 if balance_before > 0:
-                                    sarah_pct = min(1.0, pt["principal"] / balance_before)
+                                    sarah_pct = min(1.0, pt.principal / balance_before)
                                     adj = round(amount * sarah_pct, 2)
                                     adjustment += adj
-                                    pt_adjustments[pt["description"]] = (
-                                        pt_adjustments.get(pt["description"], 0.0) + adj
+                                    pt_adjustments[pt.description] = (
+                                        pt_adjustments.get(pt.description, 0.0) + adj
                                     )
 
                     adjusted_amount = round(amount - adjustment, 2)
                     if adjusted_amount > 0:
-                        interest_txns.append({"date": dt, "amount": adjusted_amount, "account": account})
+                        interest_txns.append(BankInterest(date=dt, amount=adjusted_amount, account=account))
 
-    interest_txns.sort(key=lambda t: t["date"], reverse=True)
+    interest_txns.sort(key=lambda t: t.date, reverse=True)
     pt_adjustments = {k: round(v, 2) for k, v in pt_adjustments.items()}
     return interest_txns, pt_adjustments
 

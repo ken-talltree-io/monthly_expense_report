@@ -10,6 +10,8 @@ from datetime import datetime
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+from models import AnalysisResult, Subscription
+
 from config import (
     CATEGORY_CONSOLIDATION,
     CORPORATE_TAKE_HOME_RATE,
@@ -49,30 +51,30 @@ def detect_anomalies(transactions, months, category_monthly, merchant_monthly):
     # Build per-merchant transaction lists for z-score analysis
     merchant_txns = defaultdict(list)
     for t in transactions:
-        merchant_txns[t["merchant"]].append(t)
+        merchant_txns[t.merchant].append(t)
 
     # 1. Large transactions — per-merchant z-score > threshold
     for merchant, txns in merchant_txns.items():
         # Need >= 3 transactions across >= 3 months
-        txn_months = {t["month"] for t in txns}
+        txn_months = {t.month for t in txns}
         if len(txns) < 3 or len(txn_months) < ANOMALY_MIN_HISTORY_MONTHS:
             continue
-        amounts = [t["amount"] for t in txns]
+        amounts = [t.amount for t in txns]
         mean = sum(amounts) / len(amounts)
         variance = sum((a - mean) ** 2 for a in amounts) / len(amounts)
         std_dev = variance ** 0.5
         if std_dev == 0:
             continue
         for t in txns:
-            z = (t["amount"] - mean) / std_dev
+            z = (t.amount - mean) / std_dev
             if z > ANOMALY_TXN_ZSCORE:
                 anomalies.append({
                     "type": "large_transaction",
-                    "description": f"{merchant}: ${t['amount']:,.2f} is {z:.1f}σ above avg ${mean:,.2f}",
-                    "amount": t["amount"],
-                    "date": t["date"],
+                    "description": f"{merchant}: ${t.amount:,.2f} is {z:.1f}σ above avg ${mean:,.2f}",
+                    "amount": t.amount,
+                    "date": t.date,
                     "severity": "alert" if z > 3.0 else "warning",
-                    "category": t["category"],
+                    "category": t.category,
                     "merchant": merchant,
                 })
 
@@ -113,8 +115,8 @@ def detect_anomalies(transactions, months, category_monthly, merchant_monthly):
                 # Find category from transactions
                 cat = "Uncategorized"
                 for t in transactions:
-                    if t["merchant"] == merchant:
-                        cat = t["category"]
+                    if t.merchant == merchant:
+                        cat = t.category
                         break
                 anomalies.append({
                     "type": "new_merchant",
@@ -134,12 +136,12 @@ def detect_anomalies(transactions, months, category_monthly, merchant_monthly):
 
 # ── Analysis ─────────────────────────────────────────────────────────────────
 
-def analyze(transactions: list[dict], transfers: dict | None = None,
-            debt_payoffs: list | None = None) -> dict:
+def analyze(transactions: list, transfers: dict | None = None,
+            debt_payoffs: list | None = None) -> AnalysisResult:
     transfers = transfers or {}
     debt_payoffs = debt_payoffs or []
-    months_set = sorted({t["month"] for t in transactions})
-    total = sum(t["amount"] for t in transactions)
+    months_set = sorted({t.month for t in transactions})
+    total = sum(t.amount for t in transactions)
     monthly_totals = defaultdict(float)
     category_totals = defaultdict(float)
     category_counts = defaultdict(int)
@@ -150,14 +152,14 @@ def analyze(transactions: list[dict], transfers: dict | None = None,
     monthly_txns = defaultdict(list)
 
     for t in transactions:
-        monthly_totals[t["month"]] += t["amount"]
-        category_totals[t["category"]] += t["amount"]
-        category_counts[t["category"]] += 1
-        category_monthly[t["category"]][t["month"]] += t["amount"]
-        merchant_totals[t["merchant"]] += t["amount"]
-        merchant_counts[t["merchant"]] += 1
-        merchant_monthly[t["merchant"]][t["month"]] += t["amount"]
-        monthly_txns[t["month"]].append(t)
+        monthly_totals[t.month] += t.amount
+        category_totals[t.category] += t.amount
+        category_counts[t.category] += 1
+        category_monthly[t.category][t.month] += t.amount
+        merchant_totals[t.merchant] += t.amount
+        merchant_counts[t.merchant] += 1
+        merchant_monthly[t.merchant][t.month] += t.amount
+        monthly_txns[t.month].append(t)
 
     # 3-month trend: avg of last 3 months vs avg of previous 3 months
     monthly_list = [(m, monthly_totals[m]) for m in months_set]
@@ -177,8 +179,8 @@ def analyze(transactions: list[dict], transfers: dict | None = None,
     merchant_monthly_counts = defaultdict(lambda: defaultdict(int))
     merchant_categories = {}
     for t in transactions:
-        merchant_monthly_counts[t["merchant"]][t["month"]] += 1
-        merchant_categories[t["merchant"]] = t["category"]
+        merchant_monthly_counts[t.merchant][t.month] += 1
+        merchant_categories[t.merchant] = t.category
 
     # Categories that are NOT subscription-like (regular spending, not services)
     # Use consolidated category names (post CATEGORY_CONSOLIDATION mapping)
@@ -286,17 +288,17 @@ def analyze(transactions: list[dict], transfers: dict | None = None,
             status = "stopped"
             alerts.append(f"Last charge: {present_months[-1]}")
 
-        subscriptions.append({
-            "merchant": merchant,
-            "avg": round(avg_amount, 2),
-            "history": history,
-            "status": status,
-            "alerts": alerts,
-            "months_active": len(present_months),
-            "category": cat,
-        })
+        subscriptions.append(Subscription(
+            merchant=merchant,
+            avg=round(avg_amount, 2),
+            history=history,
+            status=status,
+            alerts=alerts,
+            months_active=len(present_months),
+            category=cat,
+        ))
 
-    subscriptions.sort(key=lambda s: s["avg"], reverse=True)
+    subscriptions.sort(key=lambda s: s.avg, reverse=True)
 
     # Categories sorted by total
     categories = sorted(category_totals.items(), key=lambda x: x[1], reverse=True)
@@ -306,14 +308,20 @@ def analyze(transactions: list[dict], transfers: dict | None = None,
     # Source breakdown (credit vs debit spending by month)
     source_monthly = defaultdict(lambda: defaultdict(float))
     for t in transactions:
-        source_monthly[t.get("source", "credit")][t["month"]] += t["amount"]
+        source_monthly[t.source][t.month] += t.amount
 
-    # Fixed costs (AFT_OUT transactions)
+    # Promote detected subscriptions to fixed costs
+    sub_merchants = {s.merchant for s in subscriptions}
+    for t in transactions:
+        if not t.fixed_cost and t.merchant in sub_merchants:
+            t.fixed_cost = True
+
+    # Fixed costs (AFT_OUT + FIXED_COST_MERCHANTS + detected subscriptions)
     fixed_merchants = defaultdict(lambda: defaultdict(float))
     for t in transactions:
-        if t.get("fixed_cost"):
-            fixed_merchants[t["merchant"]][t["month"]] += t["amount"]
-    fixed_total = sum(t["amount"] for t in transactions if t.get("fixed_cost"))
+        if t.fixed_cost:
+            fixed_merchants[t.merchant][t.month] += t.amount
+    fixed_total = sum(t.amount for t in transactions if t.fixed_cost)
 
     fixed_cost_detail = sorted(
         [(m, round(sum(amounts.values()), 2),
@@ -333,7 +341,7 @@ def analyze(transactions: list[dict], transfers: dict | None = None,
         "categories": categories,
         "category_monthly": {c: {m: round(category_monthly[c].get(m, 0), 2) for m in months_set} for c in category_totals},
         "subscriptions": subscriptions,
-        "monthly_txns": {m: sorted(monthly_txns[m], key=lambda t: t["date"]) for m in months_set},
+        "monthly_txns": {m: sorted(monthly_txns[m], key=lambda t: t.date) for m in months_set},
         "transfers": transfers,
         "fixed_costs": {m: round(sum(v.get(m, 0) for v in fixed_merchants.values()), 2) for m in months_set},
         "fixed_cost_detail": fixed_cost_detail,
@@ -371,9 +379,9 @@ def get_ai_recommendations(data: dict, passive_income: dict | None = None,
             for c, t, a, n in data["categories"]
         ],
         "subscriptions": [
-            {"merchant": s["merchant"], "avg_monthly": s["avg"],
-             "status": s["status"], "alerts": s["alerts"],
-             "history": s["history"]}
+            {"merchant": s.merchant, "avg_monthly": s.avg,
+             "status": s.status, "alerts": s.alerts,
+             "history": s.history}
             for s in data["subscriptions"]
         ],
         "fixed_costs": [
@@ -390,15 +398,15 @@ def get_ai_recommendations(data: dict, passive_income: dict | None = None,
     # Passive investment income — per-account detail for portfolio-specific advice
     if passive_income:
         def _acct_summary(a):
-            s = {"name": a["account"], "type": a["type"],
-                 "balance": a["value"], "income_annual": a["income_annual"],
-                 "growth_annual": a["growth_annual"], "return_pct": a["return_pct"],
-                 "strategy": a.get("strategy", ""), "brokerage": a.get("brokerage", ""),
-                 "start_date": str(a["start_date"]) if a.get("start_date") else ""}
+            s = {"name": a.account, "type": a.type,
+                 "balance": a.value, "income_annual": a.income_annual,
+                 "growth_annual": a.growth_annual, "return_pct": a.return_pct,
+                 "strategy": a.strategy, "brokerage": a.brokerage,
+                 "start_date": str(a.start_date) if a.start_date else ""}
             # Include recent dividend_history (last 6 months)
-            dh = a.get("dividend_history", [])
+            dh = a.dividend_history
             if dh:
-                s["dividend_history"] = [{"month": d["month"], "amount": d["amount"]} for d in dh[-6:]]
+                s["dividend_history"] = [{"month": d.month, "amount": d.amount} for d in dh[-6:]]
             return s
 
         summary["passive_income"] = {
@@ -472,26 +480,24 @@ def get_ai_recommendations(data: dict, passive_income: dict | None = None,
                     "change_pct": -decline_pct if latest_rev < prior_rev else round((latest_rev - prior_rev) / prior_rev * 100, 1),
                 }
 
-    # Incoming e-transfers (reimbursements)
     if incoming_etransfers:
         etransfer_in_by_month = defaultdict(float)
-        for t in incoming_etransfers:
-            m = str(t["date"])[:7]
-            etransfer_in_by_month[m] += t["amount"]
+        for et in incoming_etransfers:
+            m = str(et.date)[:7]
+            etransfer_in_by_month[m] += et.amount
         summary["incoming_etransfers"] = {
-            "total": round(sum(t["amount"] for t in incoming_etransfers), 2),
+            "total": round(sum(et.amount for et in incoming_etransfers), 2),
             "count": len(incoming_etransfers),
             "monthly": {m: round(v, 2) for m, v in sorted(etransfer_in_by_month.items())},
         }
 
-    # Bank interest income
     if bank_interest:
         bi_by_month = defaultdict(float)
-        for t in bank_interest:
-            m = str(t["date"])[:7]
-            bi_by_month[m] += t["amount"]
+        for bi in bank_interest:
+            m = str(bi.date)[:7]
+            bi_by_month[m] += bi.amount
         summary["bank_interest"] = {
-            "total": round(sum(t["amount"] for t in bank_interest), 2),
+            "total": round(sum(bi.amount for bi in bank_interest), 2),
             "count": len(bank_interest),
             "monthly": {m: round(v, 2) for m, v in sorted(bi_by_month.items())},
         }
@@ -505,8 +511,8 @@ def get_ai_recommendations(data: dict, passive_income: dict | None = None,
     for m in spend_months:
         m_total = monthly_totals.get(m, 0)
         if debt_payoff_merchants:
-            debt_in_month = sum(t["amount"] for t in monthly_txns.get(m, [])
-                                if t["merchant"] in debt_payoff_merchants)
+            debt_in_month = sum(t.amount for t in monthly_txns.get(m, [])
+                                if t.merchant in debt_payoff_merchants)
             m_total -= debt_in_month
         adjusted[m] = m_total
     trailing_spend = spend_months[-6:] if len(spend_months) >= 6 else spend_months
@@ -525,8 +531,8 @@ def get_ai_recommendations(data: dict, passive_income: dict | None = None,
         combined_monthly += summary["corporate_income"]["estimated_take_home_monthly"]
     recent_months = set(spend_months[-6:])
     recent_n = len(recent_months) or 1
-    etransfer_avg = round(sum(t["amount"] for t in (incoming_etransfers or []) if str(t["date"])[:7] in recent_months) / recent_n, 2)
-    bi_avg = round(sum(t["amount"] for t in (bank_interest or []) if str(t["date"])[:7] in recent_months) / recent_n, 2)
+    etransfer_avg = round(sum(et.amount for et in (incoming_etransfers or []) if str(et.date)[:7] in recent_months) / recent_n, 2)
+    bi_avg = round(sum(bi.amount for bi in (bank_interest or []) if str(bi.date)[:7] in recent_months) / recent_n, 2)
     combined_monthly += etransfer_avg + bi_avg
 
     coverage_pct = round(combined_monthly / burn_rate * 100, 1) if burn_rate > 0 else 0
@@ -552,16 +558,16 @@ def get_ai_recommendations(data: dict, passive_income: dict | None = None,
     if passive_income:
         for cat in ["accounts", "registered_accounts"]:
             for a in passive_income.get(cat, []):
-                if a.get("type") == "Cash":
+                if a.type == "Cash":
                     continue
-                for dh in a.get("dividend_history", []):
-                    passive_by_month[dh["month"]] += dh["amount"]
+                for dh in a.dividend_history:
+                    passive_by_month[dh.month] += dh.amount
     etransfer_by_month = defaultdict(float)
-    for t in (incoming_etransfers or []):
-        etransfer_by_month[str(t["date"])[:7]] += t["amount"]
+    for et in (incoming_etransfers or []):
+        etransfer_by_month[str(et.date)[:7]] += et.amount
     bi_by_month_inc = defaultdict(float)
-    for t in (bank_interest or []):
-        bi_by_month_inc[str(t["date"])[:7]] += t["amount"]
+    for bi in (bank_interest or []):
+        bi_by_month_inc[str(bi.date)[:7]] += bi.amount
     monthly_passive_flat = passive_monthly
     for m in spend_months:
         corp_rev = corporate_income["revenue_monthly"].get(m, 0) * CORPORATE_TAKE_HOME_RATE if corporate_income else 0
@@ -593,13 +599,13 @@ def get_ai_recommendations(data: dict, passive_income: dict | None = None,
         from collections import defaultdict as _dd2
         _payoff_by_merchant = _dd2(lambda: {"total": 0.0, "last_date": None})
         for d in debt_payoffs:
-            _payoff_by_merchant[d["merchant"]]["total"] += d["amount"]
-            dt = d["date"]
-            prev = _payoff_by_merchant[d["merchant"]]["last_date"]
+            _payoff_by_merchant[d.merchant]["total"] += d.amount
+            dt = d.date
+            prev = _payoff_by_merchant[d.merchant]["last_date"]
             if prev is None or dt > prev:
-                _payoff_by_merchant[d["merchant"]]["last_date"] = dt
+                _payoff_by_merchant[d.merchant]["last_date"] = dt
         summary["debts_paid_off"] = {
-            "total_eliminated": round(sum(d["amount"] for d in debt_payoffs), 2),
+            "total_eliminated": round(sum(d.amount for d in debt_payoffs), 2),
             "debts": [
                 {"merchant": m, "principal": round(info["total"], 2), "paid_off": str(info["last_date"])}
                 for m, info in _payoff_by_merchant.items()

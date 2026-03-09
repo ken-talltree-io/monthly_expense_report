@@ -55,12 +55,12 @@ class TestCreditCardParsing:
         txns, _ = parse_csvs(str(tmp_path))
         assert len(txns) == 1
         t = txns[0]
-        assert t["merchant"] == "Netflix"
-        assert t["category"] == "Subscriptions & Telecom"
-        assert t["amount"] == 16.99
-        assert t["date"] == datetime(2025, 10, 15)
-        assert t["month"] == "2025-10"
-        assert t["source"] == "credit"
+        assert t.merchant == "Netflix"
+        assert t.category == "Subscriptions & Telecom"
+        assert t.amount == 16.99
+        assert t.date == datetime(2025, 10, 15)
+        assert t.month == "2025-10"
+        assert t.source == "credit"
 
     def test_negative_amount_refund_skipped(self, tmp_path):
         d = _setup_personal_dir(tmp_path)
@@ -85,7 +85,7 @@ class TestCreditCardParsing:
         ])
         txns, _ = parse_csvs(str(tmp_path))
         assert len(txns) == 1
-        assert txns[0]["fixed_cost"] is True
+        assert txns[0].fixed_cost is True
 
     def test_non_fixed_cost_has_no_flag(self, tmp_path):
         d = _setup_personal_dir(tmp_path)
@@ -93,7 +93,7 @@ class TestCreditCardParsing:
             ("2025-10-15", "COSTCO WHOLESALE #123", "200.00", "Purchase"),
         ])
         txns, _ = parse_csvs(str(tmp_path))
-        assert "fixed_cost" not in txns[0]
+        assert txns[0].fixed_cost is False
 
     def test_business_merchant_excluded(self, tmp_path):
         d = _setup_personal_dir(tmp_path)
@@ -103,7 +103,7 @@ class TestCreditCardParsing:
         ])
         txns, _ = parse_csvs(str(tmp_path))
         assert len(txns) == 1
-        assert txns[0]["merchant"] == "Netflix"
+        assert txns[0].merchant == "Netflix"
 
     def test_category_consolidation_applied(self, tmp_path):
         """Fine-grained category gets consolidated (e.g. Groceries → Food & Dining)."""
@@ -112,7 +112,7 @@ class TestCreditCardParsing:
             ("2025-10-15", "COSTCO WHOLESALE #123", "200.00", "Purchase"),
         ])
         txns, _ = parse_csvs(str(tmp_path))
-        assert txns[0]["category"] == "Food & Dining"
+        assert txns[0].category == "Food & Dining"
 
 
 # ── Debit card SPEND ─────────────────────────────────────────────────────────
@@ -129,10 +129,10 @@ class TestDebitSpend:
         txns, _ = parse_csvs(str(tmp_path))
         assert len(txns) == 1
         t = txns[0]
-        assert t["merchant"] == "Costco"
-        assert t["amount"] == 150.00  # abs() applied
-        assert t["source"] == "debit"
-        assert t["date"] == datetime(2025, 10, 20)
+        assert t.merchant == "Costco"
+        assert t.amount == 150.00  # abs() applied
+        assert t.source == "debit"
+        assert t.date == datetime(2025, 10, 20)
 
     def test_empty_amount_skipped(self, tmp_path):
         d = _setup_personal_dir(tmp_path)
@@ -150,7 +150,7 @@ class TestDebitSpend:
         ])
         txns, _ = parse_csvs(str(tmp_path))
         assert len(txns) == 1
-        assert txns[0]["merchant"] == "Costco"
+        assert txns[0].merchant == "Costco"
 
     def test_fixed_cost_merchant_flagged(self, tmp_path):
         d = _setup_personal_dir(tmp_path)
@@ -158,7 +158,7 @@ class TestDebitSpend:
             ("2025-10-20", "SPEND", "ICBC", "-280.00"),
         ])
         txns, _ = parse_csvs(str(tmp_path))
-        assert txns[0]["fixed_cost"] is True
+        assert txns[0].fixed_cost is True
 
 
 # ── Debit card AFT_OUT (pre-authorized debits) ──────────────────────────────
@@ -175,10 +175,10 @@ class TestDebitAftOut:
         txns, debt_payoffs = parse_csvs(str(tmp_path))
         assert len(txns) == 1
         t = txns[0]
-        assert t["merchant"] == "BC Hydro"
-        assert t["amount"] == 95.00
-        assert t["fixed_cost"] is True
-        assert t["source"] == "debit"
+        assert t.merchant == "BC Hydro"
+        assert t.amount == 95.00
+        assert t.fixed_cost is True
+        assert t.source == "debit"
         assert len(debt_payoffs) == 0
 
     def test_debt_payoff_above_threshold_excluded(self, tmp_path):
@@ -190,9 +190,9 @@ class TestDebitAftOut:
         txns, debt_payoffs = parse_csvs(str(tmp_path))
         assert len(txns) == 0
         assert len(debt_payoffs) == 1
-        assert debt_payoffs[0]["merchant"] == "Mortgage (First National)"
-        assert debt_payoffs[0]["amount"] == 10000.00
-        assert debt_payoffs[0]["date"] == datetime(2025, 10, 1)
+        assert debt_payoffs[0].merchant == "Mortgage (First National)"
+        assert debt_payoffs[0].amount == 10000.00
+        assert debt_payoffs[0].date == datetime(2025, 10, 1)
 
     def test_below_threshold_included_as_fixed_cost(self, tmp_path):
         """Mortgage payment at or below threshold → regular fixed-cost transaction."""
@@ -202,9 +202,9 @@ class TestDebitAftOut:
         ])
         txns, debt_payoffs = parse_csvs(str(tmp_path))
         assert len(txns) == 1
-        assert txns[0]["merchant"] == "Mortgage (First National)"
-        assert txns[0]["amount"] == 2000.00
-        assert txns[0]["fixed_cost"] is True
+        assert txns[0].merchant == "Mortgage (First National)"
+        assert txns[0].amount == 2000.00
+        assert txns[0].fixed_cost is True
         assert len(debt_payoffs) == 0
 
     def test_hyundai_above_threshold_excluded(self, tmp_path):
@@ -216,7 +216,7 @@ class TestDebitAftOut:
         txns, debt_payoffs = parse_csvs(str(tmp_path))
         assert len(txns) == 0
         assert len(debt_payoffs) == 1
-        assert debt_payoffs[0]["merchant"] == "Hyundai Car Payment"
+        assert debt_payoffs[0].merchant == "Hyundai Car Payment"
 
 
 # ── Debit card OBP_OUT (online bill payments) ───────────────────────────────
@@ -234,10 +234,10 @@ class TestDebitObpOut:
         txns, _ = parse_csvs(str(tmp_path))
         assert len(txns) == 1
         t = txns[0]
-        assert t["merchant"] == "Vancouver Property Taxes"
-        assert t["amount"] == 500.00
-        assert t["fixed_cost"] is True
-        assert t["source"] == "debit"
+        assert t.merchant == "Vancouver Property Taxes"
+        assert t.amount == 500.00
+        assert t.fixed_cost is True
+        assert t.source == "debit"
 
     def test_obp_out_without_standard_prefix(self, tmp_path):
         """If the description doesn't match the expected format, use raw description."""
@@ -247,7 +247,7 @@ class TestDebitObpOut:
         ])
         txns, _ = parse_csvs(str(tmp_path))
         assert len(txns) == 1
-        assert txns[0]["fixed_cost"] is True
+        assert txns[0].fixed_cost is True
 
 
 # ── Debit card E_TRFOUT (e-transfers) ───────────────────────────────────────
@@ -264,9 +264,9 @@ class TestDebitETransfer:
         txns, _ = parse_csvs(str(tmp_path))
         assert len(txns) == 1
         t = txns[0]
-        assert t["merchant"] == "Interac e-Transfer"
-        assert t["amount"] == 200.00
-        assert t["source"] == "debit"
+        assert t.merchant == "Interac e-Transfer"
+        assert t.amount == 200.00
+        assert t.source == "debit"
 
     def test_etransfer_has_no_fixed_cost_flag(self, tmp_path):
         d = _setup_personal_dir(tmp_path)
@@ -274,7 +274,7 @@ class TestDebitETransfer:
             ("2025-10-20", "E_TRFOUT", "Interac e-Transfer to Jane", "-50.00"),
         ])
         txns, _ = parse_csvs(str(tmp_path))
-        assert "fixed_cost" not in txns[0]
+        assert txns[0].fixed_cost is False
 
 
 # ── Output & sorting ────────────────────────────────────────────────────────
@@ -291,7 +291,7 @@ class TestOutputSorting:
             ("2025-10-20", "COSTCO WHOLESALE #123", "200.00", "Purchase"),
         ])
         txns, _ = parse_csvs(str(tmp_path))
-        dates = [t["date"] for t in txns]
+        dates = [t.date for t in txns]
         assert dates == sorted(dates)
 
     def test_returns_tuple_of_transactions_and_debt_payoffs(self, tmp_path):
@@ -317,7 +317,7 @@ class TestOutputSorting:
         ])
         txns, _ = parse_csvs(str(tmp_path))
         assert len(txns) == 3
-        dates = [t["date"] for t in txns]
+        dates = [t.date for t in txns]
         assert dates == sorted(dates)
 
 

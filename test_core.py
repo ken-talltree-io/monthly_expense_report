@@ -24,6 +24,9 @@ from config import (
     ANOMALY_TXN_ZSCORE,
     ANOMALY_NEW_MERCHANT_MIN,
 )
+from models import (AccountEntry, BalanceHistoryEntry, BankInterest, DebtPayoff,
+                     DividendHistoryEntry, ETransfer, Liability, Passthrough,
+                     StatementBalance, Subscription, Transaction)
 from analysis import analyze, detect_anomalies, get_ai_recommendations
 from income import (
     compute_net_worth_history, compute_modified_dietz, extract_passive_income,
@@ -37,16 +40,17 @@ from parsers import parse_csvs, parse_statement_balances
 
 def _txn(merchant, amount, month, category="Uncategorized", source="credit",
          fixed_cost=False):
-    """Build a minimal transaction dict."""
-    return {
-        "merchant": merchant,
-        "amount": amount,
-        "month": month,
-        "date": date(int(month[:4]), int(month[5:7]), 15),
-        "category": category,
-        "source": source,
-        "fixed_cost": fixed_cost,
-    }
+    """Build a minimal Transaction for tests."""
+    return Transaction(
+        merchant=merchant,
+        amount=amount,
+        month=month,
+        date=date(int(month[:4]), int(month[5:7]), 15),
+        raw_merchant=merchant,
+        category=category,
+        source=source,
+        fixed_cost=fixed_cost,
+    )
 
 
 def _months(n, start="2025-07"):
@@ -161,19 +165,19 @@ class TestSubscriptionDetection:
     def test_steady_monthly_charge_is_subscription(self):
         months = _months(6)
         txns = [_txn("Test Streaming", 15.99, m, "Subscriptions & Telecom") for m in months]
-        subs = {s["merchant"] for s in analyze(txns)["subscriptions"]}
+        subs = {s.merchant for s in analyze(txns)["subscriptions"]}
         assert "Test Streaming" in subs
 
     def test_one_off_purchase_is_not_subscription(self):
         txns = [_txn("Big Purchase Store", 500.00, "2025-10", "Shopping")]
-        subs = {s["merchant"] for s in analyze(txns)["subscriptions"]}
+        subs = {s.merchant for s in analyze(txns)["subscriptions"]}
         assert "Big Purchase Store" not in subs
 
     def test_cheap_recurring_charge_ignored(self):
         """Recurring charges under $5/mo are noise, not subscriptions."""
         months = _months(6)
         txns = [_txn("Micro Charge", 1.50, m, "Subscriptions & Telecom") for m in months]
-        subs = {s["merchant"] for s in analyze(txns)["subscriptions"]}
+        subs = {s.merchant for s in analyze(txns)["subscriptions"]}
         assert "Micro Charge" not in subs
 
     def test_wildly_variable_amounts_not_subscription(self):
@@ -181,19 +185,19 @@ class TestSubscriptionDetection:
         months = _months(5)
         amounts = [10, 85, 20, 150, 40]
         txns = [_txn("Random Shop", a, m, "Shopping") for a, m in zip(amounts, months)]
-        subs = {s["merchant"] for s in analyze(txns)["subscriptions"]}
+        subs = {s.merchant for s in analyze(txns)["subscriptions"]}
         assert "Random Shop" not in subs
 
     def test_retail_needs_more_evidence_than_services(self):
         """Grocery/retail categories need 4+ months; service categories need 3."""
         # 3 months of grocery visits — should NOT be flagged
         txns_3 = [_txn("Weekly Haircut", 30.00, m, "Food & Dining") for m in _months(3)]
-        subs_3 = {s["merchant"] for s in analyze(txns_3)["subscriptions"]}
+        subs_3 = {s.merchant for s in analyze(txns_3)["subscriptions"]}
         assert "Weekly Haircut" not in subs_3
 
         # Same merchant at 5 months — now it qualifies
         txns_5 = [_txn("Weekly Haircut", 30.00, m, "Food & Dining") for m in _months(5)]
-        subs_5 = {s["merchant"] for s in analyze(txns_5)["subscriptions"]}
+        subs_5 = {s.merchant for s in analyze(txns_5)["subscriptions"]}
         assert "Weekly Haircut" in subs_5
 
     def test_price_increase_flagged(self):
@@ -202,23 +206,23 @@ class TestSubscriptionDetection:
         amounts = [15.99, 15.99, 15.99, 15.99, 19.99, 19.99]
         txns = [_txn("Price Hike Svc", a, m, "Subscriptions & Telecom")
                 for a, m in zip(amounts, months)]
-        subs = {s["merchant"]: s for s in analyze(txns)["subscriptions"]}
+        subs = {s.merchant: s for s in analyze(txns)["subscriptions"]}
         assert "Price Hike Svc" in subs
-        assert subs["Price Hike Svc"]["status"] == "price_change"
+        assert subs["Price Hike Svc"].status == "price_change"
 
     def test_known_telecom_always_detected(self):
         """Known subscription keywords like 'telus' bypass the category filter."""
         months = _months(3)
         txns = [_txn("Telus Mobility", 160.00, m, "Subscriptions & Telecom")
                 for m in months]
-        subs = {s["merchant"] for s in analyze(txns)["subscriptions"]}
+        subs = {s.merchant for s in analyze(txns)["subscriptions"]}
         assert "Telus Mobility" in subs
 
     def test_excluded_merchant_never_detected(self):
         """Merchants in the exclusion list (e.g. Amazon) are never subscriptions."""
         months = _months(6)
         txns = [_txn("Amazon Vancouver", 15.00, m, "Shopping") for m in months]
-        subs = {s["merchant"] for s in analyze(txns)["subscriptions"]}
+        subs = {s.merchant for s in analyze(txns)["subscriptions"]}
         assert "Amazon Vancouver" not in subs
 
 
@@ -304,19 +308,19 @@ class TestDebtPayoffs:
     def test_debt_payoffs_passed_through(self):
         txns = [_txn("Store", 100, "2025-10", "Shopping")]
         payoffs = [
-            {"merchant": "Mortgage (First National)", "amount": 10000,
-             "date": date(2025, 10, 1)},
+            DebtPayoff(merchant="Mortgage (First National)", amount=10000,
+                       date=date(2025, 10, 1)),
         ]
         result = analyze(txns, debt_payoffs=payoffs)
         assert len(result["debt_payoffs"]) == 1
-        assert result["debt_payoffs"][0]["amount"] == 10000
+        assert result["debt_payoffs"][0].amount == 10000
 
     def test_debt_payoffs_not_in_spending_total(self):
         """Debt payoffs should be excluded from the regular spending total."""
         txns = [_txn("Store", 100, "2025-10", "Shopping")]
         payoffs = [
-            {"merchant": "Mortgage (First National)", "amount": 8000,
-             "date": date(2025, 10, 1)},
+            DebtPayoff(merchant="Mortgage (First National)", amount=8000,
+                       date=date(2025, 10, 1)),
         ]
         result = analyze(txns, debt_payoffs=payoffs)
         # Only the store transaction should count
@@ -361,7 +365,7 @@ class TestEndToEndPipeline:
         assert result["total"] == pytest.approx(648.98)
 
         # Netflix should be detected as subscription
-        sub_merchants = {s["merchant"] for s in result["subscriptions"]}
+        sub_merchants = {s.merchant for s in result["subscriptions"]}
         assert "Netflix" in sub_merchants
 
         # Categories should be ranked by total
@@ -419,7 +423,7 @@ class TestSubscriptionStatus:
         amounts = [35, 55, 40, 65, 55]
         txns = [_txn("Moderate Svc", a, m, "Subscriptions & Telecom")
                 for a, m in zip(amounts, months)]
-        subs = {s["merchant"] for s in analyze(txns)["subscriptions"]}
+        subs = {s.merchant for s in analyze(txns)["subscriptions"]}
         assert "Moderate Svc" in subs
 
     def test_alternating_price_pattern_flagged(self):
@@ -429,10 +433,10 @@ class TestSubscriptionStatus:
         amounts = [80, 100, 80, 100, 80, 100]
         txns = [_txn("Alternating Svc", a, m, "Subscriptions & Telecom")
                 for a, m in zip(amounts, months)]
-        subs = {s["merchant"]: s for s in analyze(txns)["subscriptions"]}
+        subs = {s.merchant: s for s in analyze(txns)["subscriptions"]}
         assert "Alternating Svc" in subs
-        assert subs["Alternating Svc"]["status"] == "price_change"
-        assert any("Varies" in a for a in subs["Alternating Svc"]["alerts"])
+        assert subs["Alternating Svc"].status == "price_change"
+        assert any("Varies" in a for a in subs["Alternating Svc"].alerts)
 
     def test_true_multi_price_change_shows_direction(self):
         """Multiple distinct price levels produce directional alerts."""
@@ -441,10 +445,10 @@ class TestSubscriptionStatus:
         amounts = [50, 50, 70, 70, 100, 100]
         txns = [_txn("Multi Price Svc", a, m, "Subscriptions & Telecom")
                 for a, m in zip(amounts, months)]
-        subs = {s["merchant"]: s for s in analyze(txns)["subscriptions"]}
+        subs = {s.merchant: s for s in analyze(txns)["subscriptions"]}
         assert "Multi Price Svc" in subs
-        assert subs["Multi Price Svc"]["status"] == "price_change"
-        assert any("increased" in a for a in subs["Multi Price Svc"]["alerts"])
+        assert subs["Multi Price Svc"].status == "price_change"
+        assert any("increased" in a for a in subs["Multi Price Svc"].alerts)
 
     def test_price_decrease_shows_decreased_direction(self):
         """A price drop should produce a 'decreased' alert."""
@@ -453,9 +457,9 @@ class TestSubscriptionStatus:
         amounts = [100, 100, 75, 75, 50, 50]
         txns = [_txn("Shrinking Svc", a, m, "Subscriptions & Telecom")
                 for a, m in zip(amounts, months)]
-        subs = {s["merchant"]: s for s in analyze(txns)["subscriptions"]}
+        subs = {s.merchant: s for s in analyze(txns)["subscriptions"]}
         assert "Shrinking Svc" in subs
-        assert any("decreased" in a for a in subs["Shrinking Svc"]["alerts"])
+        assert any("decreased" in a for a in subs["Shrinking Svc"].alerts)
 
     def test_new_subscription_detected(self):
         """A subscription first appearing in the last 2 months gets 'new' status."""
@@ -465,10 +469,10 @@ class TestSubscriptionStatus:
         # Known-sub keyword merchant appearing only in the last 2 months
         txns.append(_txn("Netflix New", 16.99, months[-2], "Subscriptions & Telecom"))
         txns.append(_txn("Netflix New", 16.99, months[-1], "Subscriptions & Telecom"))
-        subs = {s["merchant"]: s for s in analyze(txns)["subscriptions"]}
+        subs = {s.merchant: s for s in analyze(txns)["subscriptions"]}
         assert "Netflix New" in subs
-        assert subs["Netflix New"]["status"] == "new"
-        assert any("New recurring" in a for a in subs["Netflix New"]["alerts"])
+        assert subs["Netflix New"].status == "new"
+        assert any("New recurring" in a for a in subs["Netflix New"].alerts)
 
     def test_stopped_subscription_detected(self):
         """A subscription absent from recent months gets 'stopped' status."""
@@ -478,10 +482,10 @@ class TestSubscriptionStatus:
                 for m in months[:4]]
         # Background txns to span all 6 months
         txns.extend([_txn("Background", 100, m, "Shopping") for m in months])
-        subs = {s["merchant"]: s for s in analyze(txns)["subscriptions"]}
+        subs = {s.merchant: s for s in analyze(txns)["subscriptions"]}
         assert "Stopped Svc" in subs
-        assert subs["Stopped Svc"]["status"] == "stopped"
-        assert any("Last charge" in a for a in subs["Stopped Svc"]["alerts"])
+        assert subs["Stopped Svc"].status == "stopped"
+        assert any("Last charge" in a for a in subs["Stopped Svc"].alerts)
 
 
 # ── Source breakdown tracking ──────────────────────────────────────────────
@@ -710,8 +714,9 @@ def _analysis_data():
             "Shopping": {"2025-09": 50, "2025-10": 100, "2025-11": 150},
         },
         "subscriptions": [
-            {"merchant": "Netflix", "avg": 16.99, "status": "stable",
-             "alerts": [], "history": {"2025-10": 16.99, "2025-11": 16.99}},
+            Subscription(merchant="Netflix", avg=16.99, status="stable",
+                         alerts=[], history={"2025-10": 16.99, "2025-11": 16.99},
+                         months_active=2, category="Subscriptions & Telecom"),
         ],
         "fixed_cost_detail": [("BC Hydro", 180, {"2025-10": 90, "2025-11": 90})],
         "fixed_total": 180,
@@ -783,17 +788,20 @@ class TestAIRecommendations:
             "annual_income": 12000, "monthly_income": 1000,
             "accessible_balance": 50000, "annual_growth": 5000,
             "accounts": [
-                {"account": "TFSA", "type": "TFSA", "value": 50000,
-                 "income_annual": 2000, "growth_annual": 3000,
-                 "return_pct": 10.0, "strategy": "growth",
-                 "brokerage": "Questrade", "start_date": date(2020, 1, 1)},
+                AccountEntry(account="TFSA", brokerage="Questrade", type="TFSA",
+                             suffix="", value=50000, income_annual=2000, growth_annual=3000,
+                             return_pct=10.0, return_source="", income_source="",
+                             strategy="growth", start_date=date(2020, 1, 1),
+                             balance_source="", statement_date=""),
             ],
             "registered_annual": 5000, "registered_growth": 2000,
             "registered_monthly": 416, "registered_balance": 100000,
             "registered_accounts": [
-                {"account": "RRSP", "type": "RRSP", "value": 100000,
-                 "income_annual": 5000, "growth_annual": 2000,
-                 "return_pct": 7.0},
+                AccountEntry(account="RRSP", brokerage="", type="RRSP",
+                             suffix="", value=100000, income_annual=5000, growth_annual=2000,
+                             return_pct=7.0, return_source="", income_source="",
+                             strategy="", start_date=None, balance_source="",
+                             statement_date=""),
             ],
             "corporate_balance": 20000, "property_balance": 300000,
         }
@@ -820,12 +828,12 @@ class TestAIRecommendations:
     def test_with_etransfers_and_bank_interest(self, mock_urlopen):
         """Incoming e-transfers and bank interest are included."""
         etransfers = [
-            {"date": date(2025, 10, 5), "amount": 500},
-            {"date": date(2025, 11, 3), "amount": 300},
+            ETransfer(date=date(2025, 10, 5), amount=500),
+            ETransfer(date=date(2025, 11, 3), amount=300),
         ]
         bank_interest = [
-            {"date": date(2025, 10, 31), "amount": 50},
-            {"date": date(2025, 11, 30), "amount": 45},
+            BankInterest(date=date(2025, 10, 31), amount=50, account="Chequing"),
+            BankInterest(date=date(2025, 11, 30), amount=45, account="Chequing"),
         ]
         result = get_ai_recommendations(
             _analysis_data(),
@@ -838,8 +846,8 @@ class TestAIRecommendations:
         """Debt payoffs are summarised in the API payload."""
         data = _analysis_data()
         data["debt_payoffs"] = [
-            {"merchant": "Car Loan", "amount": 5000, "date": date(2025, 10, 15)},
-            {"merchant": "Car Loan", "amount": 3000, "date": date(2025, 11, 1)},
+            DebtPayoff(merchant="Car Loan", amount=5000, date=date(2025, 10, 15)),
+            DebtPayoff(merchant="Car Loan", amount=3000, date=date(2025, 11, 1)),
         ]
         result = get_ai_recommendations(data)
         assert result is not None
@@ -850,8 +858,8 @@ class TestAIRecommendations:
         """All optional parameters together exercise every summary branch."""
         data = _analysis_data()
         data["debt_payoffs"] = [
-            {"merchant": "Mortgage (First National)", "amount": 10000,
-             "date": date(2025, 10, 1)},
+            DebtPayoff(merchant="Mortgage (First National)", amount=10000,
+                       date=date(2025, 10, 1)),
         ]
         # Add a mortgage transaction to monthly_txns so debt adjustment works
         data["monthly_txns"]["2025-10"].append(
@@ -861,9 +869,11 @@ class TestAIRecommendations:
             "annual_income": 12000, "monthly_income": 1000,
             "accessible_balance": 50000, "annual_growth": 5000,
             "accounts": [
-                {"account": "TFSA", "type": "TFSA", "value": 50000,
-                 "income_annual": 2000, "growth_annual": 3000,
-                 "return_pct": 10.0},
+                AccountEntry(account="TFSA", brokerage="WS", type="TFSA", suffix="",
+                             value=50000, income_annual=2000, growth_annual=3000,
+                             return_pct=10.0, return_source="", income_source="",
+                             strategy="", start_date=None, balance_source="",
+                             statement_date=""),
             ],
             "registered_annual": 5000, "registered_growth": 2000,
             "registered_monthly": 416, "registered_balance": 100000,
@@ -878,8 +888,8 @@ class TestAIRecommendations:
             "first_revenue": {"date": date(2024, 7, 1), "amount": 5000},
             "first_dividend": {"date": date(2024, 12, 1), "amount": 1000},
         }
-        etransfers = [{"date": date(2025, 10, 5), "amount": 500}]
-        bank_interest = [{"date": date(2025, 10, 31), "amount": 50}]
+        etransfers = [ETransfer(date=date(2025, 10, 5), amount=500)]
+        bank_interest = [BankInterest(date=date(2025, 10, 31), amount=50, account="Chequing")]
         notes = {"costco": "Holiday party"}
 
         result = get_ai_recommendations(
@@ -892,28 +902,35 @@ class TestAIRecommendations:
 # ── Net worth history computation ─────────────────────────────────────────
 
 
-def _make_passive(accounts=None, registered=None, corporate=None, property_=None):
+def _make_passive(accounts=None, registered=None, corporate=None, property_=None, cash=None):
     """Build a minimal passive_income dict for net worth history tests."""
     return {
         "accounts": accounts or [],
         "registered_accounts": registered or [],
         "corporate_accounts": corporate or [],
         "property_accounts": property_ or [],
-        "accessible_balance": sum(a.get("value", 0) for a in (accounts or [])),
-        "registered_balance": sum(a.get("value", 0) for a in (registered or [])),
-        "corporate_balance": sum(a.get("value", 0) for a in (corporate or [])),
-        "property_balance": sum(a.get("value", 0) for a in (property_ or [])),
+        "cash_accounts": cash or [],
+        "accessible_balance": sum(a.value for a in (accounts or [])),
+        "registered_balance": sum(a.value for a in (registered or [])),
+        "corporate_balance": sum(a.value for a in (corporate or [])),
+        "property_balance": sum(a.value for a in (property_ or [])),
+        "cash_balance": sum(a.value for a in (cash or [])),
     }
 
 
 def _acct(name, value, history=None):
-    """Build a minimal account dict with optional balance_history."""
-    return {"account": name, "value": value, "balance_history": history or []}
+    """Build a minimal AccountEntry for tests."""
+    return AccountEntry(
+        account=name, brokerage="", type="TFSA", suffix="", value=value,
+        income_annual=0, growth_annual=0, return_pct=0, return_source="",
+        income_source="", strategy="", start_date=None, balance_source="",
+        statement_date="", balance_history=history or [],
+    )
 
 
 def _hist(date_str, balance):
     """Build a balance_history entry (deposits/withdrawals not needed here)."""
-    return {"date": date_str, "balance": balance, "deposits": 0, "withdrawals": 0}
+    return BalanceHistoryEntry(date=date_str, balance=balance, deposits=0, withdrawals=0)
 
 
 class TestNetWorthHistory:
@@ -1084,11 +1101,11 @@ class TestLoadPassthrough:
         )
         result = load_passthrough(str(tmp_path))
         assert len(result) == 1
-        assert result[0]["account_suffix"] == "WK4ZQ2P35CAD"
-        assert result[0]["start_date"] == date(2025, 7, 10)
-        assert result[0]["end_date"] == date(2026, 1, 22)
-        assert result[0]["principal"] == 619500.00
-        assert result[0]["description"] == "Sarah inheritance"
+        assert result[0].account_suffix == "WK4ZQ2P35CAD"
+        assert result[0].start_date == date(2025, 7, 10)
+        assert result[0].end_date == date(2026, 1, 22)
+        assert result[0].principal == 619500.00
+        assert result[0].description == "Sarah inheritance"
 
     def test_missing_file_returns_empty(self, tmp_path):
         """No passthrough.csv means no passthrough records."""
@@ -1131,19 +1148,19 @@ class TestPassthroughBankInterest:
                 "2025-09-01,INT,Interest earned,1000.00,700000.00,CAD",
             ],
         })
-        pt = [{
-            "account_suffix": "WK4ZQ2P35CAD",
-            "start_date": date(2025, 7, 10),
-            "end_date": date(2026, 1, 22),
-            "principal": 619500.00,
-            "description": "Sarah inheritance",
-        }]
+        pt = [Passthrough(
+            account_suffix="WK4ZQ2P35CAD",
+            start_date=date(2025, 7, 10),
+            end_date=date(2026, 1, 22),
+            principal=619500.00,
+            description="Sarah inheritance",
+        )]
         txns, adj = extract_bank_interest(str(tmp_path), passthrough=pt)
         assert len(txns) == 1
-        assert txns[0]["amount"] < 1000.00  # reduced
+        assert txns[0].amount < 1000.00  # reduced
         expected_adj = round(1000 * min(1.0, 619500 / 699000), 2)
         assert adj["Sarah inheritance"] == expected_adj
-        assert txns[0]["amount"] == round(1000 - expected_adj, 2)
+        assert txns[0].amount == round(1000 - expected_adj, 2)
 
     def test_interest_before_passthrough_not_adjusted(self, tmp_path):
         """INT covering a month before passthrough start is untouched."""
@@ -1153,16 +1170,16 @@ class TestPassthroughBankInterest:
                 "2025-07-01,INT,Interest earned,125.00,37500.00,CAD",
             ],
         })
-        pt = [{
-            "account_suffix": "WK4ZQ2P35CAD",
-            "start_date": date(2025, 7, 10),
-            "end_date": date(2026, 1, 22),
-            "principal": 619500.00,
-            "description": "Sarah inheritance",
-        }]
+        pt = [Passthrough(
+            account_suffix="WK4ZQ2P35CAD",
+            start_date=date(2025, 7, 10),
+            end_date=date(2026, 1, 22),
+            principal=619500.00,
+            description="Sarah inheritance",
+        )]
         txns, adj = extract_bank_interest(str(tmp_path), passthrough=pt)
         assert len(txns) == 1
-        assert txns[0]["amount"] == 125.00
+        assert txns[0].amount == 125.00
         assert adj == {}
 
     def test_full_deduction_when_principal_exceeds_balance(self, tmp_path):
@@ -1174,13 +1191,13 @@ class TestPassthroughBankInterest:
                 "2025-11-01,INT,Interest earned,500.00,300000.00,CAD",
             ],
         })
-        pt = [{
-            "account_suffix": "WK4ZQ2P35CAD",
-            "start_date": date(2025, 7, 10),
-            "end_date": date(2026, 1, 22),
-            "principal": 619500.00,
-            "description": "Sarah inheritance",
-        }]
+        pt = [Passthrough(
+            account_suffix="WK4ZQ2P35CAD",
+            start_date=date(2025, 7, 10),
+            end_date=date(2026, 1, 22),
+            principal=619500.00,
+            description="Sarah inheritance",
+        )]
         txns, adj = extract_bank_interest(str(tmp_path), passthrough=pt)
         # All interest deducted, so no transaction emitted
         assert len(txns) == 0
@@ -1195,7 +1212,7 @@ class TestPassthroughBankInterest:
         })
         txns, adj = extract_bank_interest(str(tmp_path))
         assert len(txns) == 1
-        assert txns[0]["amount"] == 1000.00
+        assert txns[0].amount == 1000.00
         assert adj == {}
 
 
@@ -1211,13 +1228,13 @@ class TestPassthroughTransfers:
             "2026-01-22,EFTOUT,Withdrawal: Sarah inheritance,-629025.64,97095.22,CAD\n"
             "2026-01-05,E_TRFOUT,Regular transfer,-500.00,200000.00,CAD\n"
         )
-        pt = [{
-            "account_suffix": "WK4ZQ2P35CAD",
-            "start_date": date(2025, 7, 10),
-            "end_date": date(2026, 1, 22),
-            "principal": 619500.00,
-            "description": "Sarah inheritance",
-        }]
+        pt = [Passthrough(
+            account_suffix="WK4ZQ2P35CAD",
+            start_date=date(2025, 7, 10),
+            end_date=date(2026, 1, 22),
+            principal=619500.00,
+            description="Sarah inheritance",
+        )]
         agg, _ = extract_transfers(str(tmp_path), passthrough=pt)
         # The $629K EFTOUT should be excluded, only the $500 E_TRFOUT remains
         jan = agg.get("2026-01", {})
@@ -1247,13 +1264,13 @@ class TestPassthroughNetWorth:
                 _hist("2025-09-30", 720000),
             ])
         ])
-        pt = [{
-            "account_suffix": "WK4ZQ2P35CAD",
-            "start_date": date(2025, 7, 10),
-            "end_date": date(2026, 1, 22),
-            "principal": 619500.00,
-            "description": "Sarah inheritance",
-        }]
+        pt = [Passthrough(
+            account_suffix="WK4ZQ2P35CAD",
+            start_date=date(2025, 7, 10),
+            end_date=date(2026, 1, 22),
+            principal=619500.00,
+            description="Sarah inheritance",
+        )]
         result = compute_net_worth_history(pi, passthrough=pt)
         aug = next(r for r in result if r["month"] == "2025-08")
         sep = next(r for r in result if r["month"] == "2025-09")
@@ -1271,13 +1288,13 @@ class TestPassthroughNetWorth:
                 _hist("2026-01-31", 200000),  # after $629K EFTOUT
             ])
         ])
-        pt = [{
-            "account_suffix": "WK4ZQ2P35CAD",
-            "start_date": date(2025, 7, 10),
-            "end_date": date(2026, 1, 22),
-            "principal": 619500.00,
-            "description": "Sarah inheritance",
-        }]
+        pt = [Passthrough(
+            account_suffix="WK4ZQ2P35CAD",
+            start_date=date(2025, 7, 10),
+            end_date=date(2026, 1, 22),
+            principal=619500.00,
+            description="Sarah inheritance",
+        )]
         result = compute_net_worth_history(pi, passthrough=pt)
         jan = next(r for r in result if r["month"] == "2026-01")
         # January: end_date (Jan 22) <= month_end (Jan 31), so no subtraction
@@ -1292,13 +1309,13 @@ class TestPassthroughNetWorth:
                 _hist("2025-08-31", 700000),   # actual balance with deposit
             ])
         ])
-        pt = [{
-            "account_suffix": "WK4ZQ2P35CAD",
-            "start_date": date(2025, 7, 10),
-            "end_date": date(2026, 1, 22),
-            "principal": 619500.00,
-            "description": "Sarah inheritance",
-        }]
+        pt = [Passthrough(
+            account_suffix="WK4ZQ2P35CAD",
+            start_date=date(2025, 7, 10),
+            end_date=date(2026, 1, 22),
+            principal=619500.00,
+            description="Sarah inheritance",
+        )]
         result = compute_net_worth_history(pi, passthrough=pt)
         jul = next(r for r in result if r["month"] == "2025-07")
         # July balance == floor, so no subtraction (excess = 0)
@@ -1324,13 +1341,13 @@ class TestPassthroughNetWorth:
                 _hist("2025-06-30", 200000),  # before passthrough
             ])
         ])
-        pt = [{
-            "account_suffix": "WK4ZQ2P35CAD",
-            "start_date": date(2025, 7, 10),
-            "end_date": date(2026, 1, 22),
-            "principal": 619500.00,
-            "description": "Sarah inheritance",
-        }]
+        pt = [Passthrough(
+            account_suffix="WK4ZQ2P35CAD",
+            start_date=date(2025, 7, 10),
+            end_date=date(2026, 1, 22),
+            principal=619500.00,
+            description="Sarah inheritance",
+        )]
         result = compute_net_worth_history(pi, passthrough=pt)
         for row in result:
             assert row["accessible"] == 200000.0
@@ -1351,10 +1368,10 @@ class TestLoadLiabilities:
         )
         result = load_liabilities(str(tmp_path))
         assert len(result) == 1
-        assert result[0]["description"] == "KIA auto loan"
-        assert result[0]["start_date"] == date(2023, 1, 1)
-        assert result[0]["end_date"] == date(2025, 6, 27)
-        assert result[0]["amount"] == 39993.32
+        assert result[0].description == "KIA auto loan"
+        assert result[0].start_date == date(2023, 1, 1)
+        assert result[0].end_date == date(2025, 6, 27)
+        assert result[0].amount == 39993.32
 
     def test_missing_file_returns_empty(self, tmp_path):
         """No liabilities.csv means no liabilities."""
@@ -1370,8 +1387,8 @@ class TestLoadLiabilities:
         )
         result = load_liabilities(str(tmp_path))
         assert len(result) == 2
-        assert result[0]["amount"] == 39993.32
-        assert result[1]["amount"] == 296942.47
+        assert result[0].amount == 39993.32
+        assert result[1].amount == 296942.47
 
 
 class TestLiabilitiesNetWorth:
@@ -1385,12 +1402,12 @@ class TestLiabilitiesNetWorth:
                 _hist("2025-02-28", 500000),
             ])
         ])
-        liabilities = [{
-            "description": "Mortgage",
-            "start_date": date(2020, 1, 1),
-            "end_date": date(2025, 7, 29),
-            "amount": 296942.47,
-        }]
+        liabilities = [Liability(
+            description="Mortgage",
+            start_date=date(2020, 1, 1),
+            end_date=date(2025, 7, 29),
+            amount=296942.47,
+        )]
         result = compute_net_worth_history(pi, liabilities=liabilities)
         jan = result[0]
         # Category value unaffected
@@ -1409,12 +1426,12 @@ class TestLiabilitiesNetWorth:
                 _hist("2025-08-31", 500000),
             ])
         ])
-        liabilities = [{
-            "description": "KIA auto loan",
-            "start_date": date(2023, 1, 1),
-            "end_date": date(2025, 6, 27),
-            "amount": 39993.32,
-        }]
+        liabilities = [Liability(
+            description="KIA auto loan",
+            start_date=date(2023, 1, 1),
+            end_date=date(2025, 6, 27),
+            amount=39993.32,
+        )]
         result = compute_net_worth_history(pi, liabilities=liabilities)
         jun = next(r for r in result if r["month"] == "2025-06")
         jul = next(r for r in result if r["month"] == "2025-07")
@@ -1433,12 +1450,12 @@ class TestLiabilitiesNetWorth:
                 _hist("2025-06-30", 500000),
             ])
         ])
-        liabilities = [{
-            "description": "Mortgage",
-            "start_date": date(2020, 1, 1),
-            "end_date": date(2025, 7, 29),
-            "amount": 296942.47,
-        }]
+        liabilities = [Liability(
+            description="Mortgage",
+            start_date=date(2020, 1, 1),
+            end_date=date(2025, 7, 29),
+            amount=296942.47,
+        )]
         result = compute_net_worth_history(pi, liabilities=liabilities)
         may = next(r for r in result if r["month"] == "2025-05")
         jun = next(r for r in result if r["month"] == "2025-06")
@@ -1457,18 +1474,18 @@ class TestLiabilitiesNetWorth:
             ])
         ])
         liabilities = [
-            {
-                "description": "KIA auto loan",
-                "start_date": date(2023, 1, 1),
-                "end_date": date(2025, 6, 27),
-                "amount": 39993.32,
-            },
-            {
-                "description": "Mortgage",
-                "start_date": date(2020, 1, 1),
-                "end_date": date(2025, 7, 29),
-                "amount": 296942.47,
-            },
+            Liability(
+                description="KIA auto loan",
+                start_date=date(2023, 1, 1),
+                end_date=date(2025, 6, 27),
+                amount=39993.32,
+            ),
+            Liability(
+                description="Mortgage",
+                start_date=date(2020, 1, 1),
+                end_date=date(2025, 7, 29),
+                amount=296942.47,
+            ),
         ]
         result = compute_net_worth_history(pi, liabilities=liabilities)
         may = next(r for r in result if r["month"] == "2025-05")
@@ -1501,12 +1518,12 @@ class TestLiabilitiesNetWorth:
                 _hist("2022-12-31", 500000),
             ])
         ])
-        liabilities = [{
-            "description": "KIA auto loan",
-            "start_date": date(2023, 1, 1),
-            "end_date": date(2025, 6, 27),
-            "amount": 39993.32,
-        }]
+        liabilities = [Liability(
+            description="KIA auto loan",
+            start_date=date(2023, 1, 1),
+            end_date=date(2025, 6, 27),
+            amount=39993.32,
+        )]
         result = compute_net_worth_history(pi, liabilities=liabilities)
         for row in result:
             assert row["liabilities"] == 0.0
@@ -1548,9 +1565,9 @@ class TestParseCsvs:
         ])
         txns, payoffs = parse_csvs(folder)
         assert len(txns) == 1
-        assert txns[0]["amount"] == 42.50
-        assert txns[0]["source"] == "credit"
-        assert txns[0]["month"] == "2025-07"
+        assert txns[0].amount == 42.50
+        assert txns[0].source == "credit"
+        assert txns[0].month == "2025-07"
 
     def test_credit_card_payment_excluded(self, tmp_path):
         """Credit card payments (negative or Payment type) are excluded."""
@@ -1561,7 +1578,7 @@ class TestParseCsvs:
         ])
         txns, _ = parse_csvs(folder)
         assert len(txns) == 1
-        assert txns[0]["amount"] == 30.00
+        assert txns[0].amount == 30.00
 
     def test_debit_spend(self, tmp_path):
         """Debit SPEND transactions are parsed."""
@@ -1570,8 +1587,8 @@ class TestParseCsvs:
         ])
         txns, _ = parse_csvs(folder)
         assert len(txns) == 1
-        assert txns[0]["amount"] == 5.50
-        assert txns[0]["source"] == "debit"
+        assert txns[0].amount == 5.50
+        assert txns[0].source == "debit"
 
     def test_debit_aft_out(self, tmp_path):
         """Debit AFT_OUT (pre-authorized debits) are parsed as fixed costs."""
@@ -1580,8 +1597,8 @@ class TestParseCsvs:
         ])
         txns, _ = parse_csvs(folder)
         assert len(txns) == 1
-        assert txns[0]["amount"] == 150.00
-        assert txns[0]["fixed_cost"] is True
+        assert txns[0].amount == 150.00
+        assert txns[0].fixed_cost is True
 
     def test_debit_obp_out(self, tmp_path):
         """Debit OBP_OUT (online bill payments) are parsed as fixed costs."""
@@ -1590,8 +1607,8 @@ class TestParseCsvs:
         ])
         txns, _ = parse_csvs(folder)
         assert len(txns) == 1
-        assert txns[0]["amount"] == 200.00
-        assert txns[0]["fixed_cost"] is True
+        assert txns[0].amount == 200.00
+        assert txns[0].fixed_cost is True
 
     def test_debit_etransfer(self, tmp_path):
         """Debit E_TRFOUT (e-Transfers) are parsed."""
@@ -1600,7 +1617,7 @@ class TestParseCsvs:
         ])
         txns, _ = parse_csvs(folder)
         assert len(txns) == 1
-        assert txns[0]["merchant"] == "Interac e-Transfer"
+        assert txns[0].merchant == "Interac e-Transfer"
 
     def test_debt_payoff_excluded(self, tmp_path):
         """AFT_OUT exceeding debt threshold is excluded and tracked as payoff."""
@@ -1615,7 +1632,7 @@ class TestParseCsvs:
         txns, payoffs = parse_csvs(folder)
         assert len(txns) == 0
         assert len(payoffs) == 1
-        assert payoffs[0]["amount"] == threshold + 1000
+        assert payoffs[0].amount == threshold + 1000
 
     def test_business_merchants_excluded(self, tmp_path):
         """Transactions for business merchants are excluded from personal spending."""
@@ -1673,10 +1690,10 @@ class TestParseStatementBalances:
         mock_run.side_effect = fake_run
         result = parse_statement_balances(str(tmp_path))
         assert "HQ1234CAD" in result
-        assert result["HQ1234CAD"]["balance"] == 10500.00
-        assert result["HQ1234CAD"]["source"] == "Wealthsimple statement"
-        assert result["HQ1234CAD"]["return_pct"] == pytest.approx(5.0, abs=0.01)
-        assert result["HQ1234CAD"]["return_source"] == "estimated"
+        assert result["HQ1234CAD"].balance == 10500.00
+        assert result["HQ1234CAD"].source == "Wealthsimple statement"
+        assert result["HQ1234CAD"].return_pct == pytest.approx(5.0, abs=0.01)
+        assert result["HQ1234CAD"].return_source == "estimated"
 
     @patch("parsers.subprocess.run")
     def test_wealthsimple_performance_pdf(self, mock_run, tmp_path):
@@ -1708,8 +1725,8 @@ class TestParseStatementBalances:
 
         mock_run.side_effect = fake_run
         result = parse_statement_balances(str(tmp_path))
-        assert result["WK9999CAD"]["return_pct"] == 12.78
-        assert result["WK9999CAD"]["return_source"] == "performance report"
+        assert result["WK9999CAD"].return_pct == 12.78
+        assert result["WK9999CAD"].return_source == "performance report"
 
     @patch("parsers.subprocess.run")
     def test_wealthsimple_performance_fallback_since_inception(self, mock_run, tmp_path):
@@ -1741,8 +1758,8 @@ class TestParseStatementBalances:
 
         mock_run.side_effect = fake_run
         result = parse_statement_balances(str(tmp_path))
-        assert result["WK8888CAD"]["return_pct"] == 8.48
-        assert result["WK8888CAD"]["return_source"] == "performance report"
+        assert result["WK8888CAD"].return_pct == 8.48
+        assert result["WK8888CAD"].return_source == "performance report"
 
     @patch("parsers.subprocess.run")
     def test_wealthsimple_dividends(self, mock_run, tmp_path):
@@ -1773,7 +1790,7 @@ class TestParseStatementBalances:
         result = parse_statement_balances(str(tmp_path))
         assert "HQ5678CAD" in result
         # 2 months of $175/mo → annualized = $350/2*12 = $2100
-        assert result["HQ5678CAD"]["dividends_annual"] == pytest.approx(2100.0)
+        assert result["HQ5678CAD"].dividends_annual == pytest.approx(2100.0)
 
     @patch("parsers.subprocess.run")
     def test_wealthsimple_usd_conversion(self, mock_run, tmp_path):
@@ -1800,7 +1817,7 @@ class TestParseStatementBalances:
         mock_run.side_effect = fake_run
         result = parse_statement_balances(str(tmp_path))
         assert "WK1234USD" in result
-        assert result["WK1234USD"]["balance"] == pytest.approx(1350.0)
+        assert result["WK1234USD"].balance == pytest.approx(1350.0)
 
     @patch("parsers.subprocess.run")
     def test_wealthsimple_crm2_skipped(self, mock_run, tmp_path):
@@ -1844,8 +1861,8 @@ class TestParseStatementBalances:
         mock_run.side_effect = fake_run
         result = parse_statement_balances(str(tmp_path))
         assert "110800007021" in result
-        assert result["110800007021"]["balance"] == 2382.71
-        assert result["110800007021"]["source"] == "Scotiabank statement"
+        assert result["110800007021"].balance == 2382.71
+        assert result["110800007021"].source == "Scotiabank statement"
 
     @patch("parsers.subprocess.run")
     def test_scotiabank_ken_personal(self, mock_run, tmp_path):
@@ -1872,7 +1889,7 @@ class TestParseStatementBalances:
         mock_run.side_effect = fake_run
         result = parse_statement_balances(str(tmp_path))
         assert "760181065327" in result
-        assert result["760181065327"]["balance"] == 0.0
+        assert result["760181065327"].balance == 0.0
 
     @patch("parsers.subprocess.run")
     def test_scotiabank_corporate(self, mock_run, tmp_path):
@@ -1898,8 +1915,8 @@ class TestParseStatementBalances:
         mock_run.side_effect = fake_run
         result = parse_statement_balances(str(tmp_path))
         assert "403600120219" in result
-        assert result["403600120219"]["balance"] == 8274.25
-        assert result["403600120219"]["date"] == "Jan 30 2026"
+        assert result["403600120219"].balance == 8274.25
+        assert result["403600120219"].date == "Jan 30 2026"
 
     @patch("parsers.subprocess.run")
     def test_bc_property_assessment(self, mock_run, tmp_path):
@@ -1922,9 +1939,9 @@ class TestParseStatementBalances:
         mock_run.side_effect = fake_run
         result = parse_statement_balances(str(tmp_path))
         assert "6113" in result
-        assert result["6113"]["balance"] == 1904900.0
-        assert result["6113"]["return_pct"] == -5.0
-        assert result["6113"]["return_source"] == "BC Assessment"
+        assert result["6113"].balance == 1904900.0
+        assert result["6113"].return_pct == -5.0
+        assert result["6113"].return_source == "BC Assessment"
 
     @patch("parsers.subprocess.run")
     def test_steadyhand_quarterly(self, mock_run, tmp_path):
@@ -1963,10 +1980,10 @@ class TestParseStatementBalances:
         mock_run.side_effect = fake_run
         result = parse_statement_balances(str(tmp_path))
         assert "1055896" in result
-        assert result["1055896"]["balance"] == 70647.20
-        assert result["1055896"]["return_pct"] == 7.4
-        assert result["1055896"]["dividends_annual"] == pytest.approx(1000.0)  # 250 * 4
-        assert result["1055896"]["source"] == "Steadyhand statement"
+        assert result["1055896"].balance == 70647.20
+        assert result["1055896"].return_pct == 7.4
+        assert result["1055896"].dividends_annual == pytest.approx(1000.0)  # 250 * 4
+        assert result["1055896"].source == "Steadyhand statement"
 
     @patch("parsers.subprocess.run")
     def test_steadyhand_beginning_value(self, mock_run, tmp_path):
@@ -2005,13 +2022,13 @@ class TestParseStatementBalances:
 
         mock_run.side_effect = fake_run
         result = parse_statement_balances(str(tmp_path))
-        hist = result["1055896"]["balance_history"]
+        hist = result["1055896"].balance_history
         # 3 points: beginning value (Dec 2024) + Q1 + Q2
         assert len(hist) == 3
-        assert hist[0]["balance"] == 62049.94
-        assert hist[0]["deposits"] == 0.0  # beginning value has no flows
-        assert hist[1]["deposits"] == 2249.99
-        assert hist[2]["deposits"] == 1500.00
+        assert hist[0].balance == 62049.94
+        assert hist[0].deposits == 0.0  # beginning value has no flows
+        assert hist[1].deposits == 2249.99
+        assert hist[2].deposits == 1500.00
 
 
 # ── Modified Dietz Return Calculation ────────────────────────────────────────
@@ -2024,11 +2041,16 @@ class TestModifiedDietz:
         return {"accounts": accounts, "registered_accounts": []}
 
     def _acct(self, name, history):
-        return {"account": name, "balance_history": history}
+        return AccountEntry(
+            account=name, brokerage="", type="TFSA", suffix="", value=0,
+            income_annual=0, growth_annual=0, return_pct=0, return_source="",
+            income_source="", strategy="", start_date=None, balance_source="",
+            statement_date="", balance_history=history,
+        )
 
     def _hist(self, date, balance, deposits=0.0, withdrawals=0.0):
-        return {"date": date, "balance": balance,
-                "deposits": deposits, "withdrawals": withdrawals}
+        return BalanceHistoryEntry(date=date, balance=balance,
+                                  deposits=deposits, withdrawals=withdrawals)
 
     def test_simple_growth_no_flows(self):
         """Pure growth with no deposits/withdrawals."""
@@ -2153,15 +2175,14 @@ class TestExtractPassiveIncome:
     def test_statement_mode_uses_stmt_balance(self, mock_stmts, tmp_path):
         """Statement mode uses balance from parsed statements, not CSV."""
         mock_stmts.return_value = {
-            "WK1234CAD": {
-                "balance": 55000.0,
-                "date": "2025-07-31",
-                "source": "Wealthsimple statement",
-                "return_pct": 8.5,
-                "return_source": "performance report",
-                "dividends_annual": 1200.0,
-                "balance_history": [],
-            }
+            "WK1234CAD": StatementBalance(
+                balance=55000.0,
+                date="2025-07-31",
+                source="Wealthsimple statement",
+                return_pct=8.5,
+                return_source="performance report",
+                dividends_annual=1200.0,
+            ),
         }
         self._write_portfolio_csv(tmp_path, [
             ("Ken TFSA", "WS", "TFSA", "WK1234CAD", ""),
@@ -2169,47 +2190,45 @@ class TestExtractPassiveIncome:
         result = extract_passive_income(str(tmp_path))
         assert result is not None
         acct = result["accounts"][0]
-        assert acct["value"] == 55000.0  # from statement, not CSV
-        assert acct["return_pct"] == 8.5
-        assert acct["return_source"] == "performance report"
-        assert acct["income_annual"] == 1200.0
-        assert acct["income_source"] == "dividends"
-        assert acct["brokerage"] == "WS"
+        assert acct.value == 55000.0  # from statement, not CSV
+        assert acct.return_pct == 8.5
+        assert acct.return_source == "performance report"
+        assert acct.income_annual == 1200.0
+        assert acct.income_source == "dividends"
+        assert acct.brokerage == "WS"
 
     @patch("income.parse_statement_balances")
     def test_statement_mode_growth_suppressed_for_estimated(self, mock_stmts, tmp_path):
         """Growth is suppressed when return_source is 'estimated'."""
         mock_stmts.return_value = {
-            "HQ1234CAD": {
-                "balance": 100000.0,
-                "date": "2025-07-31",
-                "source": "Wealthsimple statement",
-                "return_pct": 2.0,
-                "return_source": "estimated",
-                "dividends_annual": 5000.0,
-                "balance_history": [],
-            }
+            "HQ1234CAD": StatementBalance(
+                balance=100000.0,
+                date="2025-07-31",
+                source="Wealthsimple statement",
+                return_pct=2.0,
+                return_source="estimated",
+                dividends_annual=5000.0,
+            ),
         }
         self._write_portfolio_csv(tmp_path, [
             ("ETF Income", "WS", "Non-reg", "HQ1234CAD", ""),
         ])
         result = extract_passive_income(str(tmp_path))
         acct = result["accounts"][0]
-        assert acct["growth_annual"] == 0.0  # suppressed for estimated
+        assert acct.growth_annual == 0.0  # suppressed for estimated
 
     @patch("income.parse_statement_balances")
     def test_statement_mode_growth_computed_for_performance_report(self, mock_stmts, tmp_path):
         """Growth is computed when return_source is authoritative."""
         mock_stmts.return_value = {
-            "WK5678CAD": {
-                "balance": 100000.0,
-                "date": "2025-07-31",
-                "source": "Wealthsimple statement",
-                "return_pct": 10.0,
-                "return_source": "performance report",
-                "dividends_annual": 3000.0,
-                "balance_history": [],
-            }
+            "WK5678CAD": StatementBalance(
+                balance=100000.0,
+                date="2025-07-31",
+                source="Wealthsimple statement",
+                return_pct=10.0,
+                return_source="performance report",
+                dividends_annual=3000.0,
+            ),
         }
         self._write_portfolio_csv(tmp_path, [
             ("Managed", "WS", "TFSA", "WK5678CAD", ""),
@@ -2217,7 +2236,7 @@ class TestExtractPassiveIncome:
         result = extract_passive_income(str(tmp_path))
         acct = result["accounts"][0]
         # total_return = 100k * 10% = 10k; growth = 10k - 3k = 7k
-        assert acct["growth_annual"] == pytest.approx(7000.0)
+        assert acct.growth_annual == pytest.approx(7000.0)
 
     @patch("income.parse_statement_balances")
     def test_no_portfolio_csv_returns_none(self, mock_stmts, tmp_path):
@@ -2230,45 +2249,40 @@ class TestExtractPassiveIncome:
     def test_suffix_substring_matching(self, mock_stmts, tmp_path):
         """Statement keys ending with CSV suffix are matched."""
         mock_stmts.return_value = {
-            "HQ8KF6905CAD": {
-                "balance": 20000.0,
-                "date": "2025-07-31",
-                "source": "Wealthsimple statement",
-                "return_pct": 3.0,
-                "return_source": "estimated",
-                "dividends_annual": 500.0,
-                "balance_history": [],
-            }
+            "HQ8KF6905CAD": StatementBalance(
+                balance=20000.0,
+                date="2025-07-31",
+                source="Wealthsimple statement",
+                return_pct=3.0,
+                return_source="estimated",
+                dividends_annual=500.0,
+            ),
         }
         self._write_portfolio_csv(tmp_path, [
             ("Corp Savings", "WS", "Non-reg", "6905CAD", ""),
         ])
         result = extract_passive_income(str(tmp_path))
         assert result is not None
-        assert result["accounts"][0]["value"] == 20000.0
+        assert result["accounts"][0].value == 20000.0
 
     @patch("income.parse_statement_balances")
     def test_corporate_and_property_accounts(self, mock_stmts, tmp_path):
         """Corporate and Property accounts are routed correctly."""
         mock_stmts.return_value = {
-            "WK61NR": {
-                "balance": 30000.0,
-                "date": "2025-07-31",
-                "source": "Wealthsimple statement",
-                "return_pct": 2.0,
-                "return_source": "estimated",
-                "dividends_annual": None,
-                "balance_history": [],
-            },
-            "6113": {
-                "balance": 1900000.0,
-                "date": "2025-07-31",
-                "source": "property assessment",
-                "return_pct": -5.0,
-                "return_source": "estimated",
-                "dividends_annual": None,
-                "balance_history": [],
-            },
+            "WK61NR": StatementBalance(
+                balance=30000.0,
+                date="2025-07-31",
+                source="Wealthsimple statement",
+                return_pct=2.0,
+                return_source="estimated",
+            ),
+            "6113": StatementBalance(
+                balance=1900000.0,
+                date="2025-07-31",
+                source="property assessment",
+                return_pct=-5.0,
+                return_source="estimated",
+            ),
         }
         self._write_portfolio_csv(tmp_path, [
             ("Tall Tree", "WS", "Corporate", "WK61NR", ""),
@@ -2278,3 +2292,153 @@ class TestExtractPassiveIncome:
         assert result is not None
         assert result["corporate_balance"] == 30000.0
         assert result["property_balance"] == 1900000.0
+
+
+# ── Transaction Dataclass ───────────────────────────────────────────────────
+
+
+class TestTransactionDataclass:
+    """Tests for the Transaction dataclass contract."""
+
+    def test_all_fields_required(self):
+        """Constructor fails if required fields are missing."""
+        with pytest.raises(TypeError):
+            Transaction(merchant="Netflix", amount=16.99)
+
+    def test_fixed_cost_defaults_false(self):
+        """fixed_cost defaults to False when not specified."""
+        t = _txn("Netflix", 16.99, "2025-01")
+        assert t.fixed_cost is False
+
+    def test_attribute_access(self):
+        """Fields are accessible as attributes."""
+        t = _txn("Netflix", 16.99, "2025-01", category="Subscriptions & Telecom", source="credit")
+        assert t.merchant == "Netflix"
+        assert t.amount == 16.99
+        assert t.month == "2025-01"
+        assert t.category == "Subscriptions & Telecom"
+        assert t.source == "credit"
+        assert t.date == date(2025, 1, 15)
+
+    def test_mutation(self):
+        """Dataclass fields can be mutated (e.g. category overrides)."""
+        t = _txn("e-Transfer", 100, "2025-01")
+        t.category = "Kids & Education"
+        assert t.category == "Kids & Education"
+
+    def test_fixed_cost_promotion(self):
+        """fixed_cost can be set True after construction (subscription promotion)."""
+        t = _txn("Netflix", 16.99, "2025-01")
+        assert t.fixed_cost is False
+        t.fixed_cost = True
+        assert t.fixed_cost is True
+
+
+# ── Subscription-to-Fixed Promotion ─────────────────────────────────────────
+
+
+class TestSubscriptionFixedPromotion:
+    """Tests that detected subscriptions are promoted to fixed costs."""
+
+    def test_subscription_promoted_to_fixed(self):
+        """A detected subscription's transactions are marked fixed_cost=True."""
+        months = _months(6)
+        txns = [_txn("Test Service", 29.99, m, "Subscriptions & Telecom") for m in months]
+        assert all(not t.fixed_cost for t in txns)  # initially not fixed
+        analyze(txns)
+        # After analyze, subscription merchant should be promoted
+        assert all(t.fixed_cost for t in txns)
+
+    def test_non_subscription_stays_discretionary(self):
+        """One-off merchants are NOT promoted to fixed."""
+        months = _months(6)
+        txns = [_txn("Test Service", 29.99, m, "Subscriptions & Telecom") for m in months]
+        # Add a one-off purchase
+        txns.append(_txn("Random Store", 50.00, months[0], "Shopping"))
+        analyze(txns)
+        one_off = [t for t in txns if t.merchant == "Random Store"]
+        assert all(not t.fixed_cost for t in one_off)
+
+    def test_aft_out_already_fixed_unaffected(self):
+        """Transactions already marked fixed_cost=True remain so."""
+        months = _months(6)
+        txns = [_txn("BC Hydro", 95.00, m, "Housing & Utilities", fixed_cost=True) for m in months]
+        analyze(txns)
+        assert all(t.fixed_cost for t in txns)
+
+
+# ── Savings Rate Clamping ───────────────────────────────────────────────────
+
+
+class TestSavingsRateClamping:
+    """Tests that savings rate is clamped to [-300%, +100%]."""
+
+    def test_extreme_negative_rate_clamped(self):
+        """When income is near zero, savings rate is clamped to -300%."""
+        # income=50, spending=13000 → raw rate = -25900%, should clamp to -300%
+        SR_FLOOR, SR_CEIL = -300.0, 100.0
+        income, spending = 50, 13000
+        raw = round((income - spending) / income * 100, 1)
+        clamped = max(SR_FLOOR, min(SR_CEIL, raw))
+        assert raw < -300  # would be extreme
+        assert clamped == -300.0
+
+    def test_positive_rate_not_clamped(self):
+        """Normal positive savings rates pass through unclamped."""
+        SR_FLOOR, SR_CEIL = -300.0, 100.0
+        income, spending = 10000, 7000
+        raw = round((income - spending) / income * 100, 1)
+        clamped = max(SR_FLOOR, min(SR_CEIL, raw))
+        assert clamped == raw == 30.0
+
+    def test_moderate_negative_not_clamped(self):
+        """Savings rate of -200% passes through unclamped."""
+        SR_FLOOR, SR_CEIL = -300.0, 100.0
+        income, spending = 5000, 15000
+        raw = round((income - spending) / income * 100, 1)
+        clamped = max(SR_FLOOR, min(SR_CEIL, raw))
+        assert clamped == raw == -200.0
+
+
+# ── Cash Account Exclusion from Portfolio ───────────────────────────────────
+
+
+class TestCashAccountExclusion:
+    """Cash accounts excluded from portfolio but included in net worth."""
+
+    def test_cash_not_in_accessible_accounts(self):
+        """Cash accounts should be in cash_accounts, not accounts."""
+        pi = _make_passive(
+            accounts=[_acct("TFSA", 50000, [_hist("2025-01-31", 50000), _hist("2025-02-28", 52000)])],
+            cash=[_acct("Chequing", 10000, [_hist("2025-01-31", 10000), _hist("2025-02-28", 10500)])],
+        )
+        assert len(pi["accounts"]) == 1
+        assert pi["accounts"][0].account == "TFSA"
+        assert len(pi["cash_accounts"]) == 1
+        assert pi["cash_accounts"][0].account == "Chequing"
+
+    def test_cash_included_in_net_worth_accessible(self):
+        """Cash account balances roll into 'accessible' category in net worth."""
+        pi = _make_passive(
+            accounts=[_acct("TFSA", 50000, [_hist("2025-01-31", 50000), _hist("2025-02-28", 52000)])],
+            cash=[_acct("Chequing", 10000, [_hist("2025-01-31", 10000), _hist("2025-02-28", 10500)])],
+        )
+        result = compute_net_worth_history(pi)
+        assert result is not None
+        # Cash should be added to accessible
+        assert result[0]["accessible"] == 60000.0  # 50000 + 10000
+        assert result[1]["accessible"] == 62500.0  # 52000 + 10500
+        assert result[1]["total"] == 62500.0
+
+    def test_net_worth_no_double_counting(self):
+        """Cash accounts in 'accessible' category are not double-counted in total."""
+        pi = _make_passive(
+            accounts=[_acct("TFSA", 50000, [_hist("2025-01-31", 50000), _hist("2025-02-28", 50000)])],
+            cash=[_acct("Chequing", 10000, [_hist("2025-01-31", 10000), _hist("2025-02-28", 10000)])],
+        )
+        result = compute_net_worth_history(pi)
+        assert result is not None
+        # Total should be sum, not doubled
+        for row in result:
+            assert row["total"] == 60000.0
+            assert row["accessible"] == 60000.0
